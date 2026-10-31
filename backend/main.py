@@ -1077,8 +1077,7 @@ async def search_mangabaka(
     return [
         item
         for item in results
-        if is
-    instance(item, dict)
+   if isinstance(item, dict)
     ]
     # ==================================================
 # MERGE HELPERS

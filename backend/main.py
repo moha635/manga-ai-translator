@@ -443,9 +443,6 @@ async def http_request(
 
                 continue
 
-            # Do not close a successful response here.
-            # The caller still needs to read its JSON.
-
             return response
 
         except httpx.RequestError as exc:
@@ -1080,7 +1077,8 @@ async def search_mangabaka(
     return [
         item
         for item in results
-        if isinstance(item, dict)
+        if is
+    instance(item, dict)
     ]
     # ==================================================
 # MERGE HELPERS
@@ -1942,6 +1940,23 @@ def search_cache_key(
 # ARABIC SEARCH VARIANTS
 # ==================================================
 
+SEARCH_MAX_VARIANTS = 5
+
+ARABIC_TITLE_ALIASES = {}
+
+
+def arabic_phonetic_query(
+    query: str
+) -> Optional[str]:
+
+    query = safe_text(query)
+
+    if not query:
+        return None
+
+    return None
+
+
 def search_query_variants(
     query: str
 ) -> list[str]:
@@ -2024,9 +2039,7 @@ def _source_search_variants(
         for value in variants
         if isinstance(value, str) and value.strip()
     ))[:SEARCH_MAX_VARIANTS]
-
-
-# ==================================================
+    # ==================================================
 # SEARCH RESULT FILTERING
 # ==================================================
 
@@ -2161,7 +2174,9 @@ def build_search_response(
         "results": sorted_results[:limit],
         "version": APP_VERSION
     }
-    # ==================================================
+
+
+# ==================================================
 # CATALOG SEARCH
 # ==================================================
 

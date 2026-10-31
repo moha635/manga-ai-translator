@@ -13,7 +13,7 @@ logger = logging.getLogger("manga-ai")
 
 app = FastAPI(
     title="Manga AI Translator",
-    version="4.0.0"
+    version="4.1.0"
 )
 
 app.add_middleware(
@@ -23,11 +23,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Connect chapter and language detection routes
+# Chapter and language detection routes
 app.include_router(chapters_router)
+
 
 ANILIST_URL = "https://graphql.anilist.co"
 MANGADEX_URL = "https://api.mangadex.org"
+MANGABAKA_URL = "https://api.mangabaka.org/v2"
 
 
 ANILIST_QUERY = """
@@ -70,6 +72,48 @@ def safe_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def first_title(titles, language="en"):
+    if isinstance(titles, str):
+        return titles
+
+    if not isinstance(titles, list):
+        return ""
+
+    matching = [
+        item for item in titles
+        if isinstance(item, dict)
+        and item.get("language") == language
+    ]
+
+    for item in matching:
+        if item.get("is_primary"):
+            return safe_text(item.get("title"))
+
+    for item in matching:
+        if "official" in item.get("traits", []):
+            return safe_text(item.get("title"))
+
+    if matching:
+        return safe_text(matching[0].get("title"))
+
+    return ""
+
+
+def mangabaka_cover(value):
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, dict):
+        return (
+            value.get("x350")
+            or value.get("x250")
+            or value.get("x150")
+            or value.get("raw")
+        )
+
+    return None
 
 
 async def search_anilist(client, query, limit):
@@ -175,7 +219,7 @@ async def search_mangadex(client, query, limit):
 
         if cover_file:
             cover_url = (
-                f"https://uploads.mangadex.org/covers/"
+                "https://uploads.mangadex.org/covers/"
                 f"{item['id']}/{cover_file}.512.jpg"
             )
 
@@ -228,68 +272,90 @@ async def search_mangadex(client, query, limit):
     return results
 
 
-@app.get("/")
-async def home():
-    return {
-        "name": "Manga AI Translator",
-        "version": "4.0.0",
-        "status": "running",
-        "sources": ["AniList", "MangaDex"],
-        "features": [
-            "catalog_search",
-            "chapter_language_detection"
-        ]
-    }
+async def search_mangabaka(client, query, limit):
+    params = [
+        ("q", query),
+        ("limit", limit),
+        ("content_rating", "safe"),
+        ("content_rating", "suggestive")
+    ]
 
+    response = await client.get(
+        f"{MANGABAKA_URL}/series/search",
+        params=params
+    )
 
-@app.get("/health")
-async def health():
-    return {
-        "status": "healthy",
-        "version": "4.0.0"
-    }
+    response.raise_for_status()
+    payload = response.json()
 
-
-@app.get("/api/v1/catalog/search")
-async def catalog_search(
-    q: str = Query(..., min_length=1, max_length=100),
-    limit: int = Query(10, ge=1, le=20)
-):
-    headers = {
-        "User-Agent": "MangaAITranslator/4.0",
-        "Accept": "application/json"
-    }
-
-    timeout = httpx.Timeout(25.0)
-
-    async with httpx.AsyncClient(
-        headers=headers,
-        timeout=timeout
-    ) as client:
-
-        responses = await asyncio.gather(
-            search_anilist(client, q, limit),
-            search_mangadex(client, q, limit),
-            return_exceptions=True
-        )
+    if payload.get("status", response.status_code) != 200:
+        raise ValueError("MangaBaka returned an error")
 
     results = []
-    errors = []
 
-    for name, response in zip(
-        ["AniList", "MangaDex"],
-        responses
-    ):
-        if isinstance(response, Exception):
-            logger.warning(
-                "%s failed: %s",
-                name,
-                response
-            )
-            errors.append(name)
-        else:
-            results.extend(response)
+    for item in payload.get("data", []):
+        if not isinstance(item, dict):
+            continue
 
+        rating = safe_text(item.get("content_rating")).lower()
+
+        # Extra safety filter
+        if rating not in ("safe", "suggestive"):
+            continue
+
+        titles = item.get("titles") or []
+
+        english = (
+            first_title(titles, "en")
+            or safe_text(item.get("title"))
+        )
+
+        japanese = first_title(titles, "ja")
+        korean = first_title(titles, "ko")
+        chinese = first_title(titles, "zh")
+
+        native = japanese or korean or chinese
+
+        series_id = item.get("id")
+
+        if series_id is None:
+            continue
+
+        results.append({
+            "id": f"mangabaka-{series_id}",
+            "source": "MangaBaka",
+            "title": {
+                "english": english,
+                "romaji": english,
+                "native": native
+            },
+            "description": safe_text(
+                item.get("description")
+            ),
+            "cover": mangabaka_cover(
+                item.get("cover")
+            ),
+            "rating": item.get("rating"),
+            "popularity": item.get("popularity"),
+            "status": item.get("status"),
+            "chapters": item.get("total_chapters"),
+            "genres": [],
+            "country": None,
+            "release_date": item.get("published"),
+            "format": item.get("type"),
+            "url": f"https://mangabaka.org/series/{series_id}"
+        })
+
+    return results
+
+
+def normalize_name(value):
+    return " ".join(
+        safe_text(value).casefold().split()
+    )
+
+
+def merge_results(results):
     unique = {}
 
     for item in results:
@@ -301,30 +367,162 @@ async def catalog_search(
             titles.get("native")
         ]
 
-        key = next(
+        names = [
+            normalize_name(name)
+            for name in possible_names
+            if normalize_name(name)
+        ]
+
+        key = names[0] if names else item["id"]
+
+        existing_key = next(
             (
-                name.casefold().strip()
-                for name in possible_names
-                if name and name.strip()
+                current_key
+                for current_key, existing in unique.items()
+                if key == current_key
+                or key in [
+                    normalize_name(value)
+                    for value in (existing.get("title") or {}).values()
+                    if normalize_name(value)
+                ]
+                or any(
+                    name in [
+                        normalize_name(value)
+                        for value in (existing.get("title") or {}).values()
+                        if normalize_name(value)
+                    ]
+                    for name in names
+                )
             ),
-            item["id"]
+            None
         )
 
-        if key not in unique:
+        if existing_key is None:
+            item["other_sources"] = []
             unique[key] = item
-            unique[key]["other_sources"] = []
+            continue
+
+        existing = unique[existing_key]
+
+        if item["source"] != existing["source"]:
+            if item["source"] not in existing["other_sources"]:
+                existing["other_sources"].append(item["source"])
+
+        # Fill missing metadata without replacing existing values
+        for field in (
+            "description",
+            "cover",
+            "rating",
+            "popularity",
+            "status",
+            "chapters",
+            "country",
+            "release_date",
+            "format",
+            "url"
+        ):
+            if not existing.get(field) and item.get(field):
+                existing[field] = item[field]
+
+        for language in ("english", "romaji", "native"):
+            if not existing["title"].get(language):
+                existing["title"][language] = (
+                    item["title"].get(language)
+                )
+
+        existing["genres"] = list(dict.fromkeys(
+            (existing.get("genres") or [])
+            + (item.get("genres") or [])
+        ))
+
+    return list(unique.values())
+
+
+@app.get("/")
+async def home():
+    return {
+        "name": "Manga AI Translator",
+        "version": "4.1.0",
+        "status": "running",
+        "sources": [
+            "AniList",
+            "MangaDex",
+            "MangaBaka"
+        ],
+        "features": [
+            "catalog_search",
+            "chapter_language_detection",
+            "multi_source_search",
+            "result_merging"
+        ]
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "version": "4.1.0"
+    }
+
+
+@app.get("/api/v1/catalog/search")
+async def catalog_search(
+    q: str = Query(..., min_length=1, max_length=100),
+    limit: int = Query(10, ge=1, le=20)
+):
+    headers = {
+        "User-Agent": "MangaAITranslator/4.1",
+        "Accept": "application/json"
+    }
+
+    timeout = httpx.Timeout(25.0)
+
+    async with httpx.AsyncClient(
+        headers=headers,
+        timeout=timeout,
+        follow_redirects=True
+    ) as client:
+
+        source_names = [
+            "AniList",
+            "MangaDex",
+            "MangaBaka"
+        ]
+
+        responses = await asyncio.gather(
+            search_anilist(client, q, limit),
+            search_mangadex(client, q, limit),
+            search_mangabaka(client, q, limit),
+            return_exceptions=True
+        )
+
+    results = []
+    errors = []
+    successful_sources = []
+
+    for name, response in zip(
+        source_names,
+        responses
+    ):
+        if isinstance(response, Exception):
+            logger.warning(
+                "%s failed: %s",
+                name,
+                response
+            )
+            errors.append(name)
         else:
-            source = item["source"]
+            successful_sources.append(name)
+            results.extend(response)
 
-            if source not in unique[key]["other_sources"]:
-                unique[key]["other_sources"].append(source)
-
-    final_results = list(unique.values())
+    final_results = merge_results(results)
 
     return {
         "query": q,
         "total": len(final_results),
-        "sources_checked": ["AniList", "MangaDex"],
+        "sources_checked": source_names,
+        "sources_successful": successful_sources,
         "sources_with_errors": errors,
         "results": final_results
     }

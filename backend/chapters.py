@@ -1,7 +1,7 @@
 import asyncio
 import logging
-
 import httpx
+
 from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix="/api/v1", tags=["Chapters"])
@@ -32,15 +32,15 @@ logger = logging.getLogger(__name__)
 semaphore = asyncio.Semaphore(2)
 
 
-async def fetch_language(client, manga_id, code, name):
-    params = [
-        ("manga[]", manga_id),
-        ("translatedLanguage[]", code),
-        ("limit", "1"),
-        ("order[readableAt]", "desc"),
-    ]
-
+async def fetch_language(client, manga_id, code):
     async with semaphore:
+        params = {
+            "manga[]": manga_id,
+            "translatedLanguage[]": code,
+            "limit": 1,
+            "order[readableAt]": "desc",
+        }
+
         for attempt in range(3):
             try:
                 response = await client.get(
@@ -55,49 +55,39 @@ async def fetch_language(client, manga_id, code, name):
 
                 response.raise_for_status()
                 data = response.json()
-
-                total = data.get("total", 0)
                 chapters = data.get("data", [])
 
                 latest = None
 
                 if chapters:
                     chapter = chapters[0]
-                    attributes = chapter.get("attributes", {})
+                    attr = chapter.get("attributes", {})
+                    chapter_id = chapter.get("id")
 
                     latest = {
-                        "id": chapter.get("id"),
-                        "chapter": attributes.get("chapter"),
-                        "title": attributes.get("title"),
-                        "volume": attributes.get("volume"),
-                        "published_at": attributes.get("readableAt"),
-                        "url": (
-                            "https://mangadex.org/chapter/"
-                            + chapter.get("id", "")
-                        ),
+                        "id": chapter_id,
+                        "chapter": attr.get("chapter"),
+                        "title": attr.get("title"),
+                        "volume": attr.get("volume"),
+                        "published_at": attr.get("readableAt"),
+                        "url": f"https://mangadex.org/chapter/{chapter_id}",
                     }
 
                 return {
                     "language_code": code,
-                    "language_name": name,
-                    "chapter_count": total,
+                    "language_name": LANGUAGES[code],
+                    "chapter_count": data.get("total", 0),
                     "latest_chapter": latest,
                 }
 
             except Exception as error:
-                logger.warning(
-                    "Attempt %s failed for %s: %s",
-                    attempt + 1,
-                    code,
-                    error,
-                )
-
+                logger.warning("%s attempt %s: %s", code, attempt + 1, error)
                 if attempt < 2:
                     await asyncio.sleep(2 ** attempt)
 
         return {
             "language_code": code,
-            "language_name": name,
+            "language_name": LANGUAGES[code],
             "chapter_count": None,
             "latest_chapter": None,
             "error": "Source temporarily unavailable",
@@ -109,16 +99,12 @@ async def get_manga_chapters(
     manga_id: str,
     languages: list[str] | None = Query(default=None),
 ):
-    selected = languages or list(LANGUAGES.keys())
+    selected = languages if languages else list(LANGUAGES)
 
     if len(selected) > 15:
-        raise HTTPException(
-            status_code=400,
-            detail="Maximum 15 languages per request",
-        )
+        raise HTTPException(status_code=400, detail="Maximum 15 languages")
 
     unknown = [code for code in selected if code not in LANGUAGES]
-
     if unknown:
         raise HTTPException(
             status_code=400,
@@ -128,15 +114,9 @@ async def get_manga_chapters(
     async with httpx.AsyncClient(
         headers={"User-Agent": "MangaAITranslator/4.0"}
     ) as client:
-
         results = await asyncio.gather(
             *[
-                fetch_language(
-                    client,
-                    manga_id,
-                    code,
-                    LANGUAGES[code],
-                )
+                fetch_language(client, manga_id, code)
                 for code in selected
             ]
         )
@@ -148,7 +128,7 @@ async def get_manga_chapters(
 
     if arabic is None:
         arabic_status = "not_checked"
-    elif arabic.get("chapter_count") is None:
+    elif arabic["chapter_count"] is None:
         arabic_status = "unknown"
     elif arabic["chapter_count"] > 0:
         arabic_status = "available"
@@ -157,7 +137,8 @@ async def get_manga_chapters(
 
     available = sum(
         1 for item in results
-        if item.get("chapter_count", 0) > 0
+        if item["chapter_count"] is not None
+        and item["chapter_count"] > 0
     )
 
     return {
@@ -165,4 +146,5 @@ async def get_manga_chapters(
         "source": "MangaDex",
         "arabic_status": arabic_status,
         "available_languages": available,
-        "languages
+        "languages": results,
+    }

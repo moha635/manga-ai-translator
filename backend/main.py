@@ -11,12 +11,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from chapters import router as chapters_router
 
 
+# ==================================================
+# CONFIGURATION
+# ==================================================
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("manga-ai")
 
-APP_VERSION = "4.6.2"
+APP_VERSION = "4.6.3"
 
-app = FastAPI(title="Manga AI Translator", version=APP_VERSION)
+ANILIST_URL = "https://graphql.anilist.co"
+MANGADEX_URL = "https://api.mangadex.org"
+MANGABAKA_URL = "https://api.mangabaka.org/v2"
+
+REQUEST_TIMEOUT = 25.0
+DISCOVERY_SCAN_LIMIT = 20
+
+app = FastAPI(
+    title="Manga AI Translator",
+    version=APP_VERSION
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,54 +41,10 @@ app.add_middleware(
 
 app.include_router(chapters_router)
 
-ANILIST_URL = "https://graphql.anilist.co"
-MANGADEX_URL = "https://api.mangadex.org"
-MANGABAKA_URL = "https://api.mangabaka.org/v2"
 
-
-# --------------------------------------------------
-# SEARCH QUERY
-# --------------------------------------------------
-
-ANILIST_QUERY = """
-query ($search: String!, $perPage: Int!) {
-  Page(perPage: $perPage) {
-    media(search: $search, type: MANGA, sort: SEARCH_MATCH) {
-      id
-      title {
-        romaji
-        english
-        native
-      }
-      description(asHtml: false)
-      coverImage {
-        large
-        extraLarge
-      }
-      averageScore
-      popularity
-      status
-      chapters
-      volumes
-      genres
-      countryOfOrigin
-      startDate {
-        year
-        month
-        day
-      }
-      siteUrl
-      format
-      isAdult
-    }
-  }
-}
-"""
-
-
-# --------------------------------------------------
-# HELPERS
-# --------------------------------------------------
+# ==================================================
+# GENERAL HELPERS
+# ==================================================
 
 def safe_text(value: Any) -> str:
     if value is None or isinstance(value, (dict, list)):
@@ -188,6 +158,7 @@ def mangabaka_cover(value):
 
 def is_novel_format(value: Any) -> bool:
     fmt = safe_text(value).casefold()
+
     return "novel" in fmt
 
 
@@ -218,8 +189,14 @@ def normalize_genres(value: Any) -> list[str]:
 
 
 def is_doujinshi(item: dict) -> bool:
-    title_text = " ".join(title_values(item)).casefold()
-    format_text = safe_text(item.get("format")).casefold()
+    title_text = " ".join(
+        title_values(item)
+    ).casefold()
+
+    format_text = safe_text(
+        item.get("format")
+    ).casefold()
+
     genre_text = " ".join(
         normalize_genres(item.get("genres"))
     ).casefold()
@@ -231,9 +208,41 @@ def is_doujinshi(item: dict) -> bool:
     )
 
 
-# --------------------------------------------------
+def usable_display_title(item: dict) -> str:
+    titles = item.get("title") or {}
+
+    if isinstance(titles, str):
+        return safe_text(titles) or "Untitled"
+
+    if not isinstance(titles, dict):
+        return "Untitled"
+
+    return (
+        safe_text(titles.get("english"))
+        or safe_text(titles.get("romaji"))
+        or safe_text(titles.get("native"))
+        or "Untitled"
+    )
+
+
+def normalize_date(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {
+            "year": None,
+            "month": None,
+            "day": None
+        }
+
+    return {
+        "year": value.get("year"),
+        "month": value.get("month"),
+        "day": value.get("day")
+    }
+
+
+# ==================================================
 # ARABIC SEARCH
-# --------------------------------------------------
+# ==================================================
 
 ARABIC_TO_LATIN = {
     "ا": "a", "أ": "a", "إ": "i", "آ": "aa",
@@ -284,6 +293,7 @@ def search_query_variants(query: str) -> list[str]:
     variants = [query.strip()]
 
     normalized = normalize_name(query)
+
     known_alias = ARABIC_TITLE_ALIASES.get(normalized)
 
     if known_alias:
@@ -294,7 +304,8 @@ def search_query_variants(query: str) -> list[str]:
 
         if (
             phonetic
-            and normalize_name(phonetic) != normalize_name(query)
+            and normalize_name(phonetic)
+            != normalize_name(query)
         ):
             variants.append(phonetic)
 
@@ -388,9 +399,45 @@ def filter_search_results(
     return filtered
 
 
-# --------------------------------------------------
+# ==================================================
 # ANILIST SEARCH
-# --------------------------------------------------
+# ==================================================
+
+ANILIST_QUERY = """
+query ($search: String!, $perPage: Int!) {
+  Page(perPage: $perPage) {
+    media(search: $search, type: MANGA, sort: SEARCH_MATCH) {
+      id
+      title {
+        romaji
+        english
+        native
+      }
+      description(asHtml: false)
+      coverImage {
+        large
+        extraLarge
+      }
+      averageScore
+      popularity
+      status
+      chapters
+      volumes
+      genres
+      countryOfOrigin
+      startDate {
+        year
+        month
+        day
+      }
+      siteUrl
+      format
+      isAdult
+    }
+  }
+}
+"""
+
 
 async def search_anilist(client, query, limit):
 
@@ -406,6 +453,7 @@ async def search_anilist(client, query, limit):
     )
 
     response.raise_for_status()
+
     payload = response.json()
 
     if payload.get("errors"):
@@ -422,6 +470,7 @@ async def search_anilist(client, query, limit):
     results = []
 
     for item in media:
+
         if item.get("isAdult"):
             continue
 
@@ -441,33 +490,49 @@ async def search_anilist(client, query, limit):
                 "native": safe_text(title.get("native")),
             },
 
-            "description": safe_text(item.get("description")),
+            "description": safe_text(
+                item.get("description")
+            ),
 
             "cover": (
                 cover.get("extraLarge")
                 or cover.get("large")
             ),
 
-            "rating": safe_number(item.get("averageScore")),
-            "popularity": safe_number(item.get("popularity")),
+            "rating": safe_number(
+                item.get("averageScore")
+            ),
+
+            "popularity": safe_number(
+                item.get("popularity")
+            ),
+
             "status": item.get("status"),
             "chapters": item.get("chapters"),
+            "volumes": item.get("volumes"),
 
-            "genres": normalize_genres(item.get("genres")),
+            "genres": normalize_genres(
+                item.get("genres")
+            ),
 
             "country": item.get("countryOfOrigin"),
-            "release_date": item.get("startDate"),
+            "release_date": normalize_date(
+                item.get("startDate")
+            ),
 
-            "format": safe_text(item.get("format")).upper(),
+            "format": safe_text(
+                item.get("format")
+            ).upper(),
+
             "url": item.get("siteUrl"),
         })
 
     return results
 
 
-# --------------------------------------------------
+# ==================================================
 # MANGADEX SEARCH
-# --------------------------------------------------
+# ==================================================
 
 async def search_mangadex(client, query, limit):
 
@@ -486,6 +551,7 @@ async def search_mangadex(client, query, limit):
     )
 
     response.raise_for_status()
+
     payload = response.json()
 
     if payload.get("result") != "ok":
@@ -556,6 +622,7 @@ async def search_mangadex(client, query, limit):
             "popularity": None,
             "status": attributes.get("status"),
             "chapters": None,
+            "volumes": None,
             "genres": genres,
             "country": attributes.get("originalLanguage"),
             "release_date": attributes.get("year"),
@@ -569,9 +636,9 @@ async def search_mangadex(client, query, limit):
     return results
 
 
-# --------------------------------------------------
+# ==================================================
 # MANGABAKA SEARCH
-# --------------------------------------------------
+# ==================================================
 
 async def search_mangabaka(client, query, limit):
 
@@ -588,6 +655,7 @@ async def search_mangabaka(client, query, limit):
     )
 
     response.raise_for_status()
+
     payload = response.json()
 
     status = payload.get("status")
@@ -660,7 +728,9 @@ async def search_mangabaka(client, query, limit):
                 item.get("cover")
             ),
 
-            "rating": safe_number(item.get("rating")),
+            "rating": safe_number(
+                item.get("rating")
+            ),
 
             "popularity": popularity_number(
                 item.get("popularity")
@@ -668,6 +738,7 @@ async def search_mangabaka(client, query, limit):
 
             "status": item.get("status"),
             "chapters": chapters,
+            "volumes": item.get("volumes"),
 
             "genres": normalize_genres(
                 item.get("genres")
@@ -685,9 +756,9 @@ async def search_mangabaka(client, query, limit):
     return results
 
 
-# --------------------------------------------------
+# ==================================================
 # MERGE RESULTS
-# --------------------------------------------------
+# ==================================================
 
 def merge_results(results: list[dict]) -> list[dict]:
 
@@ -745,6 +816,10 @@ def merge_results(results: list[dict]) -> list[dict]:
 
             new_item["other_sources"] = []
 
+            new_item["display_title"] = (
+                usable_display_title(item)
+            )
+
             unique.append(new_item)
             continue
 
@@ -760,6 +835,7 @@ def merge_results(results: list[dict]) -> list[dict]:
             "popularity",
             "status",
             "chapters",
+            "volumes",
             "country",
             "release_date",
             "format",
@@ -789,12 +865,16 @@ def merge_results(results: list[dict]) -> list[dict]:
             + (item.get("genres") or [])
         ))
 
+        matched["display_title"] = (
+            usable_display_title(matched)
+        )
+
     return unique
 
 
-# --------------------------------------------------
-# RELEVANCE AND SORTING
-# --------------------------------------------------
+# ==================================================
+# SEARCH SORTING
+# ==================================================
 
 def calculate_relevance(item: dict, query: str) -> int:
     return title_match_score(item, query)
@@ -816,9 +896,9 @@ def sort_results(
     )
 
 
-# --------------------------------------------------
+# ==================================================
 # HOME AND HEALTH
-# --------------------------------------------------
+# ==================================================
 
 @app.get("/")
 async def home():
@@ -849,8 +929,11 @@ async def home():
             "popular_catalog",
             "top_rated_catalog",
             "trending_catalog",
+            "new_catalog",
             "completed_catalog",
             "ongoing_catalog",
+            "discovery_pagination",
+            "title_fallback",
         ],
     }
 
@@ -864,9 +947,9 @@ async def health():
     }
 
 
-# --------------------------------------------------
-# CATALOG DISCOVERY
-# --------------------------------------------------
+# ==================================================
+# DISCOVERY QUERY
+# ==================================================
 
 DISCOVER_QUERY = """
 query (
@@ -978,12 +1061,25 @@ def normalize_discovery_item(item: dict) -> dict:
     title = item.get("title") or {}
     cover = item.get("coverImage") or {}
 
-    start = item.get("startDate") or {}
-    end = item.get("endDate") or {}
+    start = normalize_date(
+        item.get("startDate")
+    )
 
-    english = safe_text(title.get("english"))
-    romaji = safe_text(title.get("romaji"))
-    native = safe_text(title.get("native"))
+    end = normalize_date(
+        item.get("endDate")
+    )
+
+    english = safe_text(
+        title.get("english")
+    )
+
+    romaji = safe_text(
+        title.get("romaji")
+    )
+
+    native = safe_text(
+        title.get("native")
+    )
 
     display_title = (
         english
@@ -1060,6 +1156,157 @@ def normalize_discovery_item(item: dict) -> dict:
     }
 
 
+def discovery_item_allowed(
+    item: dict,
+    category: str
+) -> bool:
+
+    if not isinstance(item, dict):
+        return False
+
+    if item.get("isAdult"):
+        return False
+
+    if is_novel_format(item.get("format")):
+        return False
+
+    if is_doujinshi(item):
+        return False
+
+    normalized = normalize_discovery_item(item)
+
+    if normalized["display_title"] == "Untitled":
+        return False
+
+    if not normalized["cover"]:
+        return False
+
+    popularity = normalized["popularity"] or 0
+    rating = normalized["rating"] or 0
+
+    if category == "popular":
+        return popularity > 1000
+
+    if category == "top_rated":
+        return rating > 70 and popularity > 500
+
+    return True
+
+
+def discovery_sort_key(item: dict, category: str):
+
+    if category == "popular":
+        return (
+            item["popularity"] or 0,
+            item["rating"] or 0
+        )
+
+    if category == "top_rated":
+        return (
+            item["rating"] or 0,
+            item["popularity"] or 0
+        )
+
+    if category == "trending":
+        return (
+            item["trending"] or 0,
+            item["popularity"] or 0
+        )
+
+    if category == "new":
+        date = item.get("release_date") or {}
+
+        return (
+            date.get("year") or 0,
+            date.get("month") or 0,
+            date.get("day") or 0
+        )
+
+    if category in ("completed", "ongoing"):
+        return (
+            item["popularity"] or 0,
+            item["rating"] or 0
+        )
+
+    return (0, 0)
+
+
+async def fetch_discovery_page(
+    client: httpx.AsyncClient,
+    page: int,
+    category: str
+):
+
+    variables = {
+        "page": page,
+        "perPage": 50,
+        "sort": DISCOVER_SORTS[category],
+
+        # Only regular manga/manhwa/manhua.
+        # One-shots are excluded from the main catalog.
+        "formats": ["MANGA"],
+    }
+
+    if category == "completed":
+        variables["status"] = "FINISHED"
+
+    elif category == "ongoing":
+        variables["status"] = "RELEASING"
+
+    response = await client.post(
+        ANILIST_URL,
+        json={
+            "query": DISCOVER_QUERY,
+            "variables": variables
+        }
+    )
+
+    if response.is_error:
+        logger.error(
+            "AniList discovery error: %s - %s",
+            response.status_code,
+            response.text[:1000]
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "AniList discovery request failed",
+                "upstream_status": response.status_code
+            }
+        )
+
+    payload = response.json()
+
+    if payload.get("errors"):
+        logger.error(
+            "AniList GraphQL errors: %s",
+            payload["errors"]
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "AniList GraphQL query failed",
+                "errors": payload["errors"]
+            }
+        )
+
+    page_data = (
+        (payload.get("data") or {}).get("Page")
+        or {}
+    )
+
+    return (
+        page_data.get("pageInfo") or {},
+        page_data.get("media") or []
+    )
+
+
+# ==================================================
+# CATALOG DISCOVERY ENDPOINT
+# ==================================================
+
 @app.get("/api/v1/catalog/discover")
 async def catalog_discover(
 
@@ -1082,32 +1329,27 @@ async def catalog_discover(
 
 ):
 
-    variables = {
-        "page": page,
-        "perPage": limit,
-        "sort": DISCOVER_SORTS[category],
-        "formats": [
-            "MANGA",
-            "ONE_SHOT"
-        ],
-    }
-
-    # Send status only for categories that need it.
-    # Never send null values to comparison filters.
-
-    if category == "completed":
-        variables["status"] = "FINISHED"
-
-    elif category == "ongoing":
-        variables["status"] = "RELEASING"
-
     headers = {
         "User-Agent": f"MangaAITranslator/{APP_VERSION}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
 
-    timeout = httpx.Timeout(25.0)
+    timeout = httpx.Timeout(
+        REQUEST_TIMEOUT
+    )
+
+    # We need enough valid results to fill the requested page.
+    # Fetching additional AniList pages avoids short pages after filtering.
+
+    required_results = page * limit
+
+    collected = []
+    seen_ids = set()
+
+    upstream_total = None
+    upstream_has_next = False
+    pages_scanned = 0
 
     try:
 
@@ -1116,32 +1358,57 @@ async def catalog_discover(
             timeout=timeout
         ) as client:
 
-            response = await client.post(
-                ANILIST_URL,
-                json={
-                    "query": DISCOVER_QUERY,
-                    "variables": variables
-                }
-            )
+            for upstream_page in range(
+                1,
+                DISCOVERY_SCAN_LIMIT + 1
+            ):
 
-            if response.is_error:
-
-                logger.error(
-                    "AniList discovery HTTP error: %s - %s",
-                    response.status_code,
-                    response.text[:2000]
+                info, media = await fetch_discovery_page(
+                    client,
+                    upstream_page,
+                    category
                 )
 
-                raise HTTPException(
-                    status_code=502,
-                    detail={
-                        "message": "AniList discovery request failed",
-                        "upstream_status": response.status_code,
-                        "upstream_response": response.text[:1000],
-                    }
+                pages_scanned += 1
+
+                if upstream_total is None:
+                    upstream_total = info.get("total")
+
+                upstream_has_next = bool(
+                    info.get("hasNextPage")
                 )
 
-            payload = response.json()
+                for raw_item in media:
+
+                    if not discovery_item_allowed(
+                        raw_item,
+                        category
+                    ):
+                        continue
+
+                    normalized = normalize_discovery_item(
+                        raw_item
+                    )
+
+                    item_id = normalized.get("id")
+
+                    if item_id in seen_ids:
+                        continue
+
+                    seen_ids.add(item_id)
+                    collected.append(normalized)
+
+                # Stop when we have one extra result to determine
+                # whether another page of our filtered catalog exists.
+
+                if len(collected) > required_results:
+                    break
+
+                if not upstream_has_next:
+                    break
+
+    except HTTPException:
+        raise
 
     except httpx.TimeoutException:
 
@@ -1165,117 +1432,66 @@ async def catalog_discover(
             detail="Could not connect to AniList"
         )
 
-    if payload.get("errors"):
+    except Exception:
 
-        logger.error(
-            "AniList discovery GraphQL errors: %s",
-            payload["errors"]
+        logger.exception(
+            "Unexpected discovery error"
         )
 
         raise HTTPException(
-            status_code=502,
-            detail={
-                "message": "AniList GraphQL query failed",
-                "errors": payload["errors"],
-            }
+            status_code=500,
+            detail="Unexpected catalog discovery error"
         )
 
-    page_data = (
-        (payload.get("data") or {}).get("Page")
-        or {}
-    )
-
-    info = page_data.get("pageInfo") or {}
-    media = page_data.get("media") or []
-
-    results = []
-
-    for item in media:
-
-        if not isinstance(item, dict):
-            continue
-
-        if item.get("isAdult"):
-            continue
-
-        if is_novel_format(item.get("format")):
-            continue
-
-        if is_doujinshi(item):
-            continue
-
-        normalized = normalize_discovery_item(item)
-
-        popularity = normalized["popularity"] or 0
-        rating = normalized["rating"] or 0
-
-        if category == "popular":
-            if popularity <= 1000:
-                continue
-
-        if category == "top_rated":
-            if rating <= 70 or popularity <= 500:
-                continue
-
-        results.append(normalized)
-
-    # Defensive sorting.
-
-    sort_key = {
-
-        "popular": lambda x: (
-            x["popularity"] or 0,
-            x["rating"] or 0
+    collected.sort(
+        key=lambda item: discovery_sort_key(
+            item,
+            category
         ),
-
-        "top_rated": lambda x: (
-            x["rating"] or 0,
-            x["popularity"] or 0
-        ),
-
-        "trending": lambda x: (
-            x["trending"] or 0,
-            x["popularity"] or 0
-        ),
-
-        "new": lambda x: (
-            (x["release_date"] or {}).get("year") or 0,
-            (x["release_date"] or {}).get("month") or 0,
-            (x["release_date"] or {}).get("day") or 0
-        ),
-
-        "completed": lambda x: (
-            x["popularity"] or 0,
-            x["rating"] or 0
-        ),
-
-        "ongoing": lambda x: (
-            x["popularity"] or 0,
-            x["rating"] or 0
-        ),
-    }
-
-    results.sort(
-        key=sort_key[category],
         reverse=True
     )
+
+    start_index = (page - 1) * limit
+    end_index = start_index + limit
+
+    results = collected[
+        start_index:end_index
+    ]
+
+    has_next_page = (
+        len(collected) > end_index
+        or (
+            len(collected) <= end_index
+            and upstream_has_next
+            and pages_scanned >= DISCOVERY_SCAN_LIMIT
+        )
+    )
+
+    # AniList total is the upstream total before our local filters.
+    # It is NOT presented as an exact filtered catalog count.
 
     return {
         "category": category,
         "page": page,
         "limit": limit,
+
         "source": "AniList",
-        "total": info.get("total", len(results)),
-        "has_next_page": bool(
-            info.get("hasNextPage")
-        ),
+
+        "total": None,
+        "upstream_total": upstream_total,
+        "total_is_filtered_count": False,
+
+        "has_next_page": has_next_page,
+
+        "pages_scanned": pages_scanned,
+
         "results": results,
     }
 
 
-# --------------------------------------------------
-# CATALOG SEARCH
-# --------------------------------------------------
+# ==================================================
+# CATALOG SEARCH ENDPOINT
+# ==================================================
 
 @app.get("/api/v1/catalog/search")
 async def catalog_search(
@@ -1301,11 +1517,13 @@ async def catalog_search(
         return {
             "query": q,
             "total": 0,
+
             "sources_checked": [
                 "AniList",
                 "MangaDex",
                 "MangaBaka"
             ],
+
             "sources_successful": [],
             "sources_with_errors": [],
             "results": [],
@@ -1316,55 +1534,83 @@ async def catalog_search(
         "Accept": "application/json",
     }
 
-    timeout = httpx.Timeout(25.0)
+    timeout = httpx.Timeout(
+        REQUEST_TIMEOUT
+    )
 
-    async with httpx.AsyncClient(
-        headers=headers,
-        timeout=timeout,
-        follow_redirects=True
-    ) as client:
+    source_names = [
+        "AniList",
+        "MangaDex",
+        "MangaBaka"
+    ]
 
-        source_names = [
-            "AniList",
-            "MangaDex",
-            "MangaBaka"
-        ]
+    variants = search_query_variants(
+        query
+    )
 
-        variants = search_query_variants(query)
+    tasks = []
+    task_labels = []
 
-        tasks = []
-        task_labels = []
+    try:
 
-        for candidate in variants:
+        async with httpx.AsyncClient(
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=True
+        ) as client:
 
-            tasks.extend([
-                search_anilist(
-                    client,
-                    candidate,
-                    limit
-                ),
+            for candidate in variants:
 
-                search_mangadex(
-                    client,
-                    candidate,
-                    limit
-                ),
+                tasks.extend([
+                    search_anilist(
+                        client,
+                        candidate,
+                        limit
+                    ),
 
-                search_mangabaka(
-                    client,
-                    candidate,
-                    limit
-                ),
-            ])
+                    search_mangadex(
+                        client,
+                        candidate,
+                        limit
+                    ),
 
-            task_labels.extend([
-                (name, candidate)
-                for name in source_names
-            ])
+                    search_mangabaka(
+                        client,
+                        candidate,
+                        limit
+                    ),
+                ])
 
-        responses = await asyncio.gather(
-            *tasks,
-            return_exceptions=True
+                task_labels.extend([
+                    (name, candidate)
+                    for name in source_names
+                ])
+
+            responses = await asyncio.gather(
+                *tasks,
+                return_exceptions=True
+            )
+
+    except httpx.TimeoutException:
+
+        logger.exception(
+            "Catalog search timed out"
+        )
+
+        raise HTTPException(
+            status_code=504,
+            detail="Catalog search timed out"
+        )
+
+    except httpx.RequestError:
+
+        logger.exception(
+            "Catalog search connection error"
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail="Could not connect to catalog sources"
         )
 
     results = []
@@ -1409,12 +1655,15 @@ async def catalog_search(
         query
     )[:limit]
 
+    for item in final_results:
+        item["display_title"] = (
+            usable_display_title(item)
+        )
+
     return {
         "query": query,
 
-        "query_variants": search_query_variants(
-            query
-        ),
+        "query_variants": variants,
 
         "total": len(final_results),
 

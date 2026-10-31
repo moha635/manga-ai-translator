@@ -14,7 +14,7 @@ from chapters import router as chapters_router
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("manga-ai")
 
-APP_VERSION = "4.6.1"
+APP_VERSION = "4.6.2"
 
 app = FastAPI(title="Manga AI Translator", version=APP_VERSION)
 
@@ -41,9 +41,16 @@ query ($search: String!, $perPage: Int!) {
   Page(perPage: $perPage) {
     media(search: $search, type: MANGA, sort: SEARCH_MATCH) {
       id
-      title { romaji english native }
+      title {
+        romaji
+        english
+        native
+      }
       description(asHtml: false)
-      coverImage { large extraLarge }
+      coverImage {
+        large
+        extraLarge
+      }
       averageScore
       popularity
       status
@@ -51,7 +58,11 @@ query ($search: String!, $perPage: Int!) {
       volumes
       genres
       countryOfOrigin
-      startDate { year month day }
+      startDate {
+        year
+        month
+        day
+      }
       siteUrl
       format
       isAdult
@@ -68,30 +79,36 @@ query ($search: String!, $perPage: Int!) {
 def safe_text(value: Any) -> str:
     if value is None or isinstance(value, (dict, list)):
         return ""
+
     return str(value).strip()
 
 
 def safe_number(value: Any):
     if isinstance(value, bool):
         return None
+
     if isinstance(value, (int, float)):
         return value
+
     if isinstance(value, str):
         try:
             return float(value)
         except ValueError:
             return None
+
     return None
 
 
 def popularity_number(value: Any) -> float:
     direct = safe_number(value)
+
     if direct is not None:
         return direct
 
     if isinstance(value, dict):
         for key in ("score", "value", "popularity"):
             number = safe_number(value.get(key))
+
             if number is not None:
                 return number
 
@@ -102,6 +119,7 @@ def normalize_name(value: Any) -> str:
     text = safe_text(value).casefold()
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"[^\w\s]", " ", text)
+
     return " ".join(text.split())
 
 
@@ -110,8 +128,10 @@ def title_values(item: dict) -> list[str]:
 
     if isinstance(titles, str):
         values = [titles]
+
     elif isinstance(titles, dict):
         values = list(titles.values())
+
     else:
         values = []
 
@@ -141,6 +161,7 @@ def first_title(titles, language="en"):
 
     for item in matching:
         traits = item.get("traits") or []
+
         if isinstance(traits, list) and "official" in traits:
             return safe_text(item.get("title"))
 
@@ -199,12 +220,14 @@ def normalize_genres(value: Any) -> list[str]:
 def is_doujinshi(item: dict) -> bool:
     title_text = " ".join(title_values(item)).casefold()
     format_text = safe_text(item.get("format")).casefold()
-    genres = " ".join(item.get("genres") or []).casefold()
+    genre_text = " ".join(
+        normalize_genres(item.get("genres"))
+    ).casefold()
 
     return (
         "doujinshi" in title_text
         or "doujinshi" in format_text
-        or "doujinshi" in genres
+        or "doujinshi" in genre_text
     )
 
 
@@ -275,7 +298,9 @@ def search_query_variants(query: str) -> list[str]:
         ):
             variants.append(phonetic)
 
-    return list(dict.fromkeys(v for v in variants if v))
+    return list(dict.fromkeys(
+        value for value in variants if value
+    ))
 
 
 def title_match_score(item: dict, query: str) -> int:
@@ -304,6 +329,7 @@ def title_match_score(item: dict, query: str) -> int:
 
         else:
             title_tokens = set(name.split())
+
             matched = sum(
                 token in title_tokens
                 for token in q_tokens
@@ -331,6 +357,8 @@ def filter_search_results(
     filtered = []
     seen_ids = set()
 
+    variants = search_query_variants(query)
+
     for item in results:
         if not isinstance(item, dict):
             continue
@@ -343,7 +371,7 @@ def filter_search_results(
 
         if not any(
             title_match_score(item, candidate) > 0
-            for candidate in search_query_variants(query)
+            for candidate in variants
         ):
             continue
 
@@ -688,7 +716,6 @@ def merge_results(results: list[dict]) -> list[dict]:
         matched = None
 
         if names:
-
             for existing in unique:
 
                 if existing.get("source") == source:
@@ -752,7 +779,6 @@ def merge_results(results: list[dict]) -> list[dict]:
         ):
 
             if not matched["title"].get(language):
-
                 matched["title"][language] = (
                     (item.get("title") or {}).get(language)
                     or ""
@@ -848,9 +874,7 @@ query (
   $perPage: Int!,
   $sort: [MediaSort],
   $status: MediaStatus,
-  $formats: [MediaFormat],
-  $minPopularity: Int,
-  $minScore: Int
+  $formats: [MediaFormat]
 ) {
   Page(page: $page, perPage: $perPage) {
 
@@ -866,8 +890,6 @@ query (
       sort: $sort,
       status: $status,
       format_in: $formats,
-      popularity_greater: $minPopularity,
-      averageScore_greater: $minScore,
       isAdult: false
     ) {
 
@@ -1060,47 +1082,24 @@ async def catalog_discover(
 
 ):
 
-    min_popularity = None
-    min_score = None
-
-    if category == "popular":
-        min_popularity = 1000
-
-    elif category == "top_rated":
-        min_popularity = 500
-        min_score = 70
-
-    elif category == "completed":
-        min_popularity = 100
-
-    elif category == "ongoing":
-        min_popularity = 100
-
-    # AniList Media does not support trending_greater.
-    # Trending is selected using TRENDING_DESC sorting.
-
     variables = {
         "page": page,
         "perPage": limit,
-
         "sort": DISCOVER_SORTS[category],
-
-        "status": (
-            "FINISHED"
-            if category == "completed"
-            else "RELEASING"
-            if category == "ongoing"
-            else None
-        ),
-
         "formats": [
             "MANGA",
             "ONE_SHOT"
         ],
-
-        "minPopularity": min_popularity,
-        "minScore": min_score,
     }
+
+    # Send status only for categories that need it.
+    # Never send null values to comparison filters.
+
+    if category == "completed":
+        variables["status"] = "FINISHED"
+
+    elif category == "ongoing":
+        variables["status"] = "RELEASING"
 
     headers = {
         "User-Agent": f"MangaAITranslator/{APP_VERSION}",
@@ -1207,46 +1206,34 @@ async def catalog_discover(
 
         normalized = normalize_discovery_item(item)
 
-        if category == "popular":
+        popularity = normalized["popularity"] or 0
+        rating = normalized["rating"] or 0
 
-            if (
-                normalized["popularity"] or 0
-            ) <= 1000:
+        if category == "popular":
+            if popularity <= 1000:
                 continue
 
         if category == "top_rated":
-
-            if (
-                normalized["rating"] or 0
-            ) <= 70:
-                continue
-
-            if (
-                normalized["popularity"] or 0
-            ) <= 500:
+            if rating <= 70 or popularity <= 500:
                 continue
 
         results.append(normalized)
 
     # Defensive sorting.
-    # Missing values are placed after real values.
 
     sort_key = {
 
         "popular": lambda x: (
-            x["popularity"] is not None,
             x["popularity"] or 0,
             x["rating"] or 0
         ),
 
         "top_rated": lambda x: (
-            x["rating"] is not None,
             x["rating"] or 0,
             x["popularity"] or 0
         ),
 
         "trending": lambda x: (
-            x["trending"] is not None,
             x["trending"] or 0,
             x["popularity"] or 0
         ),

@@ -1,12 +1,23 @@
 import asyncio
 import logging
+import re
+import uuid
+from difflib import SequenceMatcher
+
 import httpx
 
 from fastapi import APIRouter, HTTPException, Query
 
+
 router = APIRouter(prefix="/api/v1", tags=["Chapters"])
 
-BASE_URL = "https://api.mangadex.org"
+MANGADEX_URL = "https://api.mangadex.org"
+ANILIST_URL = "https://graphql.anilist.co"
+
+HEADERS = {
+    "User-Agent": "MangaAITranslator/5.0",
+    "Accept": "application/json",
+}
 
 LANGUAGES = {
     "ar": "العربية",
@@ -29,11 +40,268 @@ LANGUAGES = {
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-semaphore = asyncio.Semaphore(2)
+semaphore = asyncio.Semaphore(3)
 
+
+# ==================================================
+# TEXT HELPERS
+# ==================================================
+
+def normalize_title(value):
+    if not value:
+        return ""
+
+    value = str(value).lower().strip()
+    value = re.sub(r"[^\w\s]", " ", value)
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
+
+
+def title_similarity(first, second):
+    first = normalize_title(first)
+    second = normalize_title(second)
+
+    if not first or not second:
+        return 0
+
+    if first == second:
+        return 1.0
+
+    return SequenceMatcher(None, first, second).ratio()
+
+
+def extract_titles(media):
+    titles = media.get("title") or {}
+
+    result = []
+
+    for key in ("english", "romaji", "native"):
+        value = titles.get(key)
+
+        if value:
+            result.append(value)
+
+    for synonym in media.get("synonyms") or []:
+        if synonym:
+            result.append(synonym)
+
+    return list(dict.fromkeys(result))
+
+
+# ==================================================
+# ANILIST
+# ==================================================
+
+async def fetch_anilist(manga_id):
+    query = """
+    query ($id: Int) {
+        Media(id: $id, type: MANGA) {
+            id
+            idMal
+            title {
+                romaji
+                english
+                native
+            }
+            synonyms
+            chapters
+            volumes
+            status
+            coverImage {
+                large
+            }
+            siteUrl
+        }
+    }
+    """
+
+    try:
+        async with httpx.AsyncClient(
+            headers=HEADERS,
+            timeout=25,
+        ) as client:
+
+            response = await client.post(
+                ANILIST_URL,
+                json={
+                    "query": query,
+                    "variables": {
+                        "id": int(manga_id)
+                    },
+                },
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            if data.get("errors"):
+                logger.error("AniList errors: %s", data["errors"])
+                return None
+
+            return data.get("data", {}).get("Media")
+
+    except (ValueError, httpx.HTTPError):
+        logger.exception("AniList request failed")
+        return None
+
+
+# ==================================================
+# MANGADEX SEARCH
+# ==================================================
+
+async def search_mangadex(title):
+    if not title:
+        return []
+
+    params = {
+        "title": title,
+        "limit": 10,
+        "includes[]": ["cover_art"],
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            headers=HEADERS,
+            timeout=25,
+        ) as client:
+
+            response = await client.get(
+                f"{MANGADEX_URL}/manga",
+                params=params,
+            )
+
+            response.raise_for_status()
+
+            return response.json().get("data", [])
+
+    except httpx.HTTPError:
+        logger.exception("MangaDex search failed")
+        return []
+
+
+def get_mangadex_titles(manga):
+    attributes = manga.get("attributes", {})
+
+    titles = list(
+        (attributes.get("title") or {}).values()
+    )
+
+    for alternative in attributes.get("altTitles", []):
+        titles.extend(alternative.values())
+
+    return [title for title in titles if title]
+
+
+def match_mangadex(anilist_media, candidates):
+    anilist_titles = extract_titles(anilist_media)
+
+    best_match = None
+    best_score = 0
+
+    for candidate in candidates:
+        candidate_titles = get_mangadex_titles(candidate)
+
+        score = 0
+
+        for first in anilist_titles:
+            for second in candidate_titles:
+                score = max(
+                    score,
+                    title_similarity(first, second),
+                )
+
+        if score > best_score:
+            best_score = score
+            best_match = candidate
+
+    if best_score < 0.72:
+        return None, best_score
+
+    return best_match, best_score
+
+
+# ==================================================
+# RESOLVE MANGA ID
+# ==================================================
+
+async def resolve_manga(identifier):
+    """
+    Accepts either an AniList numeric ID
+    or a MangaDex UUID.
+    """
+
+    try:
+        uuid.UUID(identifier)
+
+        return {
+            "source_id": identifier,
+            "anilist": None,
+            "mangadex": identifier,
+            "match_score": 1.0,
+        }
+
+    except (ValueError, AttributeError):
+        pass
+
+    if not str(identifier).isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid manga ID",
+        )
+
+    anilist = await fetch_anilist(identifier)
+
+    if not anilist:
+        raise HTTPException(
+            status_code=404,
+            detail="Manga not found in AniList",
+        )
+
+    titles = extract_titles(anilist)
+
+    candidates = []
+
+    for title in titles:
+        results = await search_mangadex(title)
+        candidates.extend(results)
+
+        if candidates:
+            break
+
+    if not candidates:
+        raise HTTPException(
+            status_code=404,
+            detail="Manga not found in MangaDex",
+        )
+
+    mangadex, score = match_mangadex(
+        anilist,
+        candidates,
+    )
+
+    if not mangadex:
+        raise HTTPException(
+            status_code=404,
+            detail="No reliable MangaDex title match found",
+        )
+
+    return {
+        "source_id": identifier,
+        "anilist": anilist,
+        "mangadex": mangadex.get("id"),
+        "match_score": round(score, 3),
+    }
+
+
+# ==================================================
+# CHAPTER FETCHING
+# ==================================================
 
 async def fetch_language(client, manga_id, code):
     async with semaphore:
+
         params = {
             "translatedLanguage[]": code,
             "limit": 1,
@@ -42,26 +310,12 @@ async def fetch_language(client, manga_id, code):
 
         try:
             response = await client.get(
-                f"{BASE_URL}/manga/{manga_id}/feed",
+                f"{MANGADEX_URL}/manga/{manga_id}/feed",
                 params=params,
                 timeout=25,
             )
 
-            if response.status_code != 200:
-                logger.error(
-                    "MangaDex error %s for %s: %s",
-                    response.status_code,
-                    code,
-                    response.text[:500],
-                )
-
-                return {
-                    "language_code": code,
-                    "language_name": LANGUAGES[code],
-                    "chapter_count": None,
-                    "latest_chapter": None,
-                    "error": f"HTTP {response.status_code}",
-                }
+            response.raise_for_status()
 
             data = response.json()
             chapters = data.get("data", [])
@@ -79,7 +333,10 @@ async def fetch_language(client, manga_id, code):
                     "title": attr.get("title"),
                     "volume": attr.get("volume"),
                     "published_at": attr.get("readableAt"),
-                    "url": f"https://mangadex.org/chapter/{chapter_id}",
+                    "url": (
+                        f"https://mangadex.org/chapter/"
+                        f"{chapter_id}"
+                    ),
                 }
 
             return {
@@ -89,19 +346,11 @@ async def fetch_language(client, manga_id, code):
                 "latest_chapter": latest,
             }
 
-        except httpx.TimeoutException:
-            logger.warning("Timeout for language %s", code)
-
-            return {
-                "language_code": code,
-                "language_name": LANGUAGES[code],
-                "chapter_count": None,
-                "latest_chapter": None,
-                "error": "Request timeout",
-            }
-
-        except Exception as error:
-            logger.exception("Error for language %s", code)
+        except httpx.HTTPError as error:
+            logger.exception(
+                "Chapter language request failed: %s",
+                code,
+            )
 
             return {
                 "language_code": code,
@@ -111,6 +360,10 @@ async def fetch_language(client, manga_id, code):
                 "error": str(error),
             }
 
+
+# ==================================================
+# OLD CHAPTER SUMMARY ROUTE
+# ==================================================
 
 @router.get("/manga/{manga_id}/chapters")
 async def get_manga_chapters(
@@ -136,16 +389,20 @@ async def get_manga_chapters(
             detail=f"Unsupported languages: {unknown}",
         )
 
+    resolved = await resolve_manga(manga_id)
+    mangadex_id = resolved["mangadex"]
+
     async with httpx.AsyncClient(
-        headers={
-            "User-Agent": "MangaAITranslator/4.0",
-            "Accept": "application/json",
-        }
+        headers=HEADERS,
     ) as client:
 
         results = await asyncio.gather(
             *[
-                fetch_language(client, manga_id, code)
+                fetch_language(
+                    client,
+                    mangadex_id,
+                    code,
+                )
                 for code in selected
             ]
         )
@@ -160,10 +417,13 @@ async def get_manga_chapters(
 
     if arabic is None:
         arabic_status = "not_checked"
+
     elif arabic["chapter_count"] is None:
         arabic_status = "unknown"
+
     elif arabic["chapter_count"] > 0:
         arabic_status = "available"
+
     else:
         arabic_status = "not_available"
 
@@ -174,10 +434,22 @@ async def get_manga_chapters(
     )
 
     return {
-        "manga_id": manga_id,
-        "source": "MangaDex",
+        "source_id": manga_id,
+        "anilist_id": (
+            resolved["anilist"]["id"]
+            if resolved["anilist"]
+            else None
+        ),
+        "mangadex_id": mangadex_id,
+        "match_score": resolved["match_score"],
+        "source": "AniList + MangaDex",
         "arabic_status": arabic_status,
         "available_languages": available,
+        "anilist_chapters": (
+            resolved["anilist"].get("chapters")
+            if resolved["anilist"]
+            else None
+        ),
         "languages": results,
     }
 
@@ -200,6 +472,9 @@ async def get_chapter_list(
             detail=f"Unsupported language: {language}",
         )
 
+    resolved = await resolve_manga(manga_id)
+    mangadex_id = resolved["mangadex"]
+
     params = {
         "translatedLanguage[]": language,
         "limit": limit,
@@ -210,79 +485,20 @@ async def get_chapter_list(
 
     try:
         async with httpx.AsyncClient(
-            headers={
-                "User-Agent": "MangaAITranslator/4.0",
-                "Accept": "application/json",
-            },
+            headers=HEADERS,
             timeout=30,
         ) as client:
 
             response = await client.get(
-                f"{BASE_URL}/manga/{manga_id}/feed",
+                f"{MANGADEX_URL}/manga/{mangadex_id}/feed",
                 params=params,
             )
 
-        if response.status_code != 200:
-            logger.error(
-                "Chapter list error %s: %s",
-                response.status_code,
-                response.text[:500],
-            )
+            response.raise_for_status()
 
-            raise HTTPException(
-                status_code=response.status_code,
-                detail="MangaDex chapter request failed",
-            )
-
-        data = response.json()
+            data = response.json()
 
         chapters = []
 
         for item in data.get("data", []):
-            attr = item.get("attributes", {})
-            chapter_id = item.get("id")
-
-            groups = [
-                relation.get("attributes", {}).get("name")
-                for relation in item.get("relationships", [])
-                if relation.get("type") == "scanlation_group"
-                and relation.get("attributes", {}).get("name")
-            ]
-
-            chapters.append({
-                "id": chapter_id,
-                "chapter": attr.get("chapter"),
-                "title": attr.get("title"),
-                "volume": attr.get("volume"),
-                "language": language,
-                "language_name": LANGUAGES[language],
-                "published_at": attr.get("readableAt"),
-                "pages": attr.get("pages"),
-                "external_url": attr.get("externalUrl"),
-                "scanlation_groups": groups,
-                "url": f"https://mangadex.org/chapter/{chapter_id}",
-            })
-
-        return {
-            "success": True,
-            "manga_id": manga_id,
-            "language": language,
-            "language_name": LANGUAGES[language],
-            "total": data.get("total", 0),
-            "limit": limit,
-            "offset": offset,
-            "next_offset": offset + len(chapters),
-            "chapters": chapters,
-        }
-
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="MangaDex request timeout",
-        )
-
-    except httpx.RequestError:
-        raise HTTPException(
-            status_code=502,
-            detail="Unable to connect to MangaDex",
-        )
+            attr

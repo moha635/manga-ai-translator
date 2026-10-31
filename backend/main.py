@@ -6,12 +6,14 @@ import httpx
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from chapters import router as chapters_router
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("manga-ai")
 
 app = FastAPI(
     title="Manga AI Translator",
-    version="3.0.0"
+    version="4.0.0"
 )
 
 app.add_middleware(
@@ -21,6 +23,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Connect chapter and language detection routes
+app.include_router(chapters_router)
 
 ANILIST_URL = "https://graphql.anilist.co"
 MANGADEX_URL = "https://api.mangadex.org"
@@ -68,27 +72,6 @@ def safe_text(value: Any) -> str:
     return str(value).strip()
 
 
-def normalize_result(item: dict) -> dict:
-    titles = item.get("title") or {}
-
-    return {
-        "id": item.get("id"),
-        "source": item.get("source"),
-        "title": titles,
-        "description": item.get("description", ""),
-        "cover": item.get("cover"),
-        "rating": item.get("rating"),
-        "popularity": item.get("popularity"),
-        "status": item.get("status"),
-        "chapters": item.get("chapters"),
-        "genres": item.get("genres", []),
-        "country": item.get("country"),
-        "release_date": item.get("release_date"),
-        "format": item.get("format"),
-        "url": item.get("url"),
-    }
-
-
 async def search_anilist(client, query, limit):
     response = await client.post(
         ANILIST_URL,
@@ -125,22 +108,18 @@ async def search_anilist(client, query, limit):
         results.append({
             "id": f"anilist-{item['id']}",
             "source": "AniList",
-
             "title": {
                 "english": safe_text(title.get("english")),
                 "romaji": safe_text(title.get("romaji")),
                 "native": safe_text(title.get("native"))
             },
-
             "description": safe_text(
                 item.get("description")
             ),
-
             "cover": (
                 cover.get("extraLarge")
                 or cover.get("large")
             ),
-
             "rating": item.get("averageScore"),
             "popularity": item.get("popularity"),
             "status": item.get("status"),
@@ -216,7 +195,6 @@ async def search_mangadex(client, query, limit):
         results.append({
             "id": f"mangadex-{item['id']}",
             "source": "MangaDex",
-
             "title": {
                 "english": safe_text(english_title),
                 "romaji": safe_text(
@@ -224,11 +202,9 @@ async def search_mangadex(client, query, limit):
                 ),
                 "native": safe_text(native_title)
             },
-
             "description": safe_text(
                 (attributes.get("description") or {}).get("en")
             ),
-
             "cover": cover_url,
             "rating": None,
             "popularity": None,
@@ -256,15 +232,22 @@ async def search_mangadex(client, query, limit):
 async def home():
     return {
         "name": "Manga AI Translator",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "status": "running",
-        "sources": ["AniList", "MangaDex"]
+        "sources": ["AniList", "MangaDex"],
+        "features": [
+            "catalog_search",
+            "chapter_language_detection"
+        ]
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "version": "4.0.0"
+    }
 
 
 @app.get("/api/v1/catalog/search")
@@ -273,7 +256,7 @@ async def catalog_search(
     limit: int = Query(10, ge=1, le=20)
 ):
     headers = {
-        "User-Agent": "MangaAITranslator/3.0",
+        "User-Agent": "MangaAITranslator/4.0",
         "Accept": "application/json"
     }
 
@@ -298,7 +281,11 @@ async def catalog_search(
         responses
     ):
         if isinstance(response, Exception):
-            logger.warning("%s failed: %s", name, response)
+            logger.warning(
+                "%s failed: %s",
+                name,
+                response
+            )
             errors.append(name)
         else:
             results.extend(response)
@@ -327,9 +314,10 @@ async def catalog_search(
             unique[key] = item
             unique[key]["other_sources"] = []
         else:
-            unique[key]["other_sources"].append(
-                item["source"]
-            )
+            source = item["source"]
+
+            if source not in unique[key]["other_sources"]:
+                unique[key]["other_sources"].append(source)
 
     final_results = list(unique.values())
 

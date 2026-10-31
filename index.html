@@ -1,733 +1,463 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#0b0b12">
-  <meta name="description" content="MANGA AI TRANSLATOR - اكتشف المانهوا واقرأها باللغة العربية.">
-  <title>MANGA AI TRANSLATOR</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MANGA AI - عالم المانهوا بالعربية</title>
 
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #0b0b12;
-      --panel: #171622;
-      --panel-2: #1c1b29;
-      --border: #302a43;
-      --text: #fff;
-      --muted: #aaa;
-      --accent: #a78bfa;
-      --accent-strong: #8055dc;
-    }
-
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font-family: Arial, Tahoma, sans-serif;
-      line-height: 1.6;
-    }
-
-    header {
-      min-height: 72px;
-      padding: 16px 6%;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 20px;
-      background: #11111c;
-      border-bottom: 1px solid #252238;
-    }
-
-    .logo {
-      color: var(--accent);
-      font-size: 21px;
-      font-weight: 800;
-      white-space: nowrap;
-    }
-
-    .logo span { color: var(--text); }
-
-    nav {
-      display: flex;
-      align-items: center;
-      gap: 22px;
-    }
-
-    nav a {
-      color: #bbb;
-      text-decoration: none;
-      font-size: 14px;
-    }
-
-    nav a:hover { color: var(--accent); }
-
-    .hero {
-      padding: 72px 20px 54px;
-      text-align: center;
-      background: linear-gradient(135deg, #21153c 0%, #100f1a 55%, var(--bg) 100%);
-    }
-
-    .hero h1 {
-      margin: 0 0 12px;
-      font-size: clamp(28px, 5vw, 42px);
-      line-height: 1.3;
-    }
-
-    .hero h1 span { color: var(--accent); }
-
-    .hero p {
-      max-width: 650px;
-      margin: 0 auto 26px;
-      color: var(--muted);
-    }
-
-    .search-wrap {
-      position: relative;
-      width: min(100%, 620px);
-      margin: 0 auto;
-      z-index: 20;
-    }
-
-    .search {
-      display: flex;
-      width: 100%;
-      overflow: hidden;
-      border: 1px solid #44346b;
-      border-radius: 12px;
-      background: var(--panel-2);
-    }
-
-    .search input {
-      flex: 1;
-      min-width: 0;
-      padding: 16px;
-      border: 0;
-      outline: 0;
-      color: var(--text);
-      background: transparent;
-      font-size: 15px;
-    }
-
-    .search input::placeholder { color: #888; }
-
-    .search button {
-      padding: 0 24px;
-      border: 0;
-      color: white;
-      background: var(--accent-strong);
-      font-size: 15px;
-      cursor: pointer;
-    }
-
-    .search button:hover { background: #9168e8; }
-
-    .suggestions {
-      display: none;
-      position: absolute;
-      top: calc(100% + 8px);
-      right: 0;
-      left: 0;
-      max-height: 430px;
-      overflow-y: auto;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      background: #171622;
-      box-shadow: 0 12px 35px #0009;
-      text-align: right;
-    }
-
-    .suggestions.show { display: block; }
-
-    .suggestion {
-      width: 100%;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 10px;
-      border: 0;
-      border-bottom: 1px solid #302a43;
-      color: white;
-      background: transparent;
-      text-align: right;
-      cursor: pointer;
-    }
-
-    .suggestion:hover,
-    .suggestion:focus {
-      background: #29233b;
-      outline: none;
-    }
-
-    .suggestion img {
-      width: 53px;
-      height: 70px;
-      flex-shrink: 0;
-      object-fit: cover;
-      border-radius: 6px;
-      background: #30234d;
-    }
-
-    .suggestion-info {
-      min-width: 0;
-      flex: 1;
-    }
-
-    .suggestion-title {
-      display: block;
-      font-size: 14px;
-      font-weight: bold;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .suggestion-meta {
-      display: block;
-      margin-top: 4px;
-      color: #aaa;
-      font-size: 11px;
-    }
-
-    .suggestion-message {
-      padding: 16px;
-      color: #aaa;
-      font-size: 13px;
-      text-align: center;
-    }
-
-    .container {
-      width: min(1200px, 100%);
-      margin: 0 auto;
-      padding: 38px 6%;
-    }
-
-    .section-title {
-      margin: 0 0 22px;
-      padding-right: 12px;
-      border-right: 4px solid var(--accent);
-      font-size: 23px;
-    }
-
-    .filters {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-bottom: 24px;
-    }
-
-    .filters button {
-      padding: 9px 17px;
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      color: #ccc;
-      background: #1b1928;
-      cursor: pointer;
-    }
-
-    .filters button.active,
-    .filters button:hover {
-      border-color: var(--accent-strong);
-      color: white;
-      background: var(--accent-strong);
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 18px;
-    }
-
-    .card {
-      overflow: hidden;
-      border: 1px solid #292638;
-      border-radius: 12px;
-      background: var(--panel);
-      transition: transform .2s ease, border-color .2s ease;
-    }
-
-    .card:hover {
-      transform: translateY(-4px);
-      border-color: var(--accent-strong);
-    }
-
-    .cover {
-      width: 100%;
-      height: 245px;
-      display: block;
-      object-fit: cover;
-      background: linear-gradient(145deg, #39245f, #151322);
-    }
-
-    .cover-placeholder {
-      height: 245px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 12px;
-      color: #e8ddff;
-      background: linear-gradient(145deg, #39245f, #151322);
-      font-size: 22px;
-      font-weight: bold;
-      text-align: center;
-    }
-
-    .card-info { padding: 14px; }
-
-    .card h3 {
-      margin: 0 0 8px;
-      font-size: 16px;
-    }
-
-    .card p {
-      min-height: 42px;
-      margin: 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .badge {
-      display: inline-block;
-      margin-top: 12px;
-      padding: 5px 9px;
-      border-radius: 5px;
-      color: #d5c4ff;
-      background: #30234d;
-      font-size: 11px;
-    }
-
-    .card-link {
-      display: inline-block;
-      margin-top: 12px;
-      color: var(--accent);
-      font-size: 12px;
-      text-decoration: none;
-    }
-
-    .empty {
-      display: none;
-      padding: 28px 10px;
-      color: var(--muted);
-      text-align: center;
-    }
-
-    .loading {
-      display: none;
-      padding: 20px;
-      color: var(--accent);
-      text-align: center;
-    }
-
-    footer {
-      margin-top: 36px;
-      padding: 28px 16px;
-      border-top: 1px solid #252238;
-      color: #888;
-      text-align: center;
-    }
-
-    @media (max-width: 800px) {
-      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      nav { gap: 12px; }
-      nav a { font-size: 13px; }
-      .hero { padding-top: 55px; }
-    }
-
-    @media (max-width: 520px) {
-      header { padding: 14px 5%; }
-      nav { display: none; }
-      .container { padding: 30px 5%; }
-      .cover, .cover-placeholder { height: 190px; }
-      .card-info { padding: 10px; }
-      .card h3 { font-size: 14px; }
-      .search button { padding: 0 16px; }
-    }
-  </style>
+<style>
+:root {
+  --bg:#0b0912;
+  --card:#171322;
+  --purple:#8b5cf6;
+  --text:#f5f3ff;
+  --muted:#aaa2bd;
+  --border:#302640;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font-family:Arial,Tahoma,sans-serif;
+}
+header{
+  padding:20px 6%;
+  border-bottom:1px solid var(--border);
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+}
+.logo{font-size:23px;font-weight:bold;color:#b99aff}
+.container{max-width:1100px;margin:auto;padding:25px 18px}
+.hero{text-align:center;padding:35px 10px}
+.hero h1{font-size:34px;margin-bottom:12px}
+.hero p{color:var(--muted);line-height:1.8}
+.searchbox{max-width:650px;margin:25px auto;position:relative}
+input{
+  width:100%;padding:17px 20px;
+  border:1px solid var(--border);
+  border-radius:13px;
+  background:var(--card);
+  color:white;font-size:16px;outline:none;
+}
+input:focus{border-color:var(--purple)}
+.suggestions{
+  position:absolute;top:58px;right:0;left:0;
+  background:#171322;border:1px solid var(--border);
+  border-radius:12px;z-index:20;overflow:hidden;
+  display:none;max-height:420px;overflow-y:auto;
+}
+.suggestion{
+  display:flex;align-items:center;gap:13px;
+  padding:10px;border-bottom:1px solid var(--border);
+  cursor:pointer;text-align:right;
+}
+.suggestion:hover{background:#292039}
+.suggestion img{width:48px;height:65px;object-fit:cover;border-radius:6px}
+.suggestion div{flex:1}
+.small{font-size:12px;color:var(--muted);margin-top:6px}
+.section-title{margin:30px 0 18px;font-size:22px}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(155px,1fr));
+  gap:17px;
+}
+.card{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:12px;overflow:hidden;cursor:pointer;
+  transition:.2s;
+}
+.card:hover{transform:translateY(-4px);border-color:var(--purple)}
+.card img{width:100%;height:220px;object-fit:cover;background:#211a2d}
+.card-info{padding:12px}
+.card h3{font-size:15px;margin:0 0 9px}
+.muted{color:var(--muted);font-size:12px;line-height:1.7}
+.badge{
+  display:inline-block;background:#302044;color:#c8aaff;
+  padding:5px 9px;border-radius:20px;font-size:11px;margin:3px;
+}
+button{
+  background:var(--purple);color:white;border:0;
+  border-radius:9px;padding:11px 17px;
+  font-size:14px;cursor:pointer;
+}
+button.secondary{background:#302640}
+button:disabled{opacity:.5;cursor:not-allowed}
+#details{display:none}
+.detail-top{
+  display:flex;gap:22px;align-items:flex-start;
+  background:var(--card);padding:20px;border-radius:15px;
+  border:1px solid var(--border);
+}
+.detail-cover{width:170px;max-width:35%;border-radius:10px}
+.detail-info{flex:1}
+.detail-info h1{margin-top:0}
+.description{color:#c5bed1;line-height:1.9;white-space:pre-line}
+.languages{display:flex;flex-wrap:wrap;gap:8px;margin:15px 0}
+.language{
+  background:#241b32;border:1px solid var(--border);
+  padding:9px 12px;border-radius:8px;font-size:13px
+}
+.chapter{
+  background:var(--card);padding:14px;margin:9px 0;
+  border:1px solid var(--border);border-radius:9px;
+  display:flex;justify-content:space-between;gap:10px;
+}
+.status{color:#c4a5ff}
+.message{color:var(--muted);padding:20px;text-align:center}
+.hidden{display:none!important}
+footer{text-align:center;padding:35px;color:var(--muted);font-size:13px}
+@media(max-width:600px){
+ .hero h1{font-size:26px}
+ .detail-top{gap:13px;padding:13px}
+ .detail-cover{width:115px}
+ .detail-info h1{font-size:19px}
+ .card img{height:190px}
+}
+</style>
 </head>
 
 <body>
-  <header>
-    <div class="logo">MANGA <span>AI</span></div>
-    <nav aria-label="القائمة الرئيسية">
-      <a href="#">الرئيسية</a>
-      <a href="#library">المكتبة</a>
-      <a href="#about">عن المنصة</a>
-    </nav>
-  </header>
 
-  <main>
-    <section class="hero">
-      <h1>عالم المانهوا <span>بالعربية</span></h1>
-      <p>اكتشف المانهوا المفضلة لديك، واقرأ قصصك باللغة العربية بمساعدة الذكاء الاصطناعي.</p>
+<header>
+  <div class="logo">MANGA AI</div>
+  <div class="muted">عالم المانهوا بالعربية</div>
+</header>
 
-      <div class="search-wrap">
-        <form class="search" id="searchForm" role="search">
-          <input
-            id="searchInput"
-            type="search"
-            placeholder="ابحث عن اسم المانهوا..."
-            aria-label="ابحث عن اسم المانهوا"
-            autocomplete="off"
-          >
-          <button type="submit">بحث</button>
-        </form>
+<main class="container">
 
-        <div class="suggestions" id="suggestions" role="listbox"></div>
+<section id="home">
+  <div class="hero">
+    <h1>اكتشف عالم المانهوا</h1>
+    <p>ابحث عن المانغا والمانهوا والمانها من مختلف المصادر.</p>
+
+    <div class="searchbox">
+      <input id="search" type="search"
+        placeholder="ابحث بالاسم العربي أو الإنجليزي..."
+        autocomplete="off">
+      <div id="suggestions" class="suggestions"></div>
+    </div>
+  </div>
+
+  <h2 class="section-title">نتائج البحث</h2>
+  <div id="results" class="grid"></div>
+  <div id="searchMessage" class="message">
+    اكتب اسم المانهوا للبحث.
+  </div>
+</section>
+
+<section id="details">
+  <button class="secondary" onclick="goBack()">← رجوع</button>
+
+  <div class="detail-top" style="margin-top:18px">
+    <img id="detailCover" class="detail-cover" src="" alt="غلاف المانهوا">
+    <div class="detail-info">
+      <h1 id="detailTitle"></h1>
+      <div id="detailOriginal" class="muted"></div>
+      <div id="detailBadges"></div>
+      <p id="detailDescription" class="description"></p>
+      <div id="detailSource" class="muted"></div>
+    </div>
+  </div>
+
+  <h2 class="section-title">الفصول واللغات المتوفرة</h2>
+  <div id="languageList" class="languages"></div>
+  <div id="chapterList"></div>
+  <div id="chapterMessage" class="message"></div>
+</section>
+
+</main>
+
+<footer>
+  MANGA AI TRANSLATOR — منصة لاكتشاف المانهوا
+</footer>
+
+<script>
+const API_BASE = "https://manga-ai-translator.onrender.com/api/v1";
+
+const searchInput = document.getElementById("search");
+const suggestions = document.getElementById("suggestions");
+const results = document.getElementById("results");
+const searchMessage = document.getElementById("searchMessage");
+
+let searchTimer = null;
+let currentItems = [];
+let selectedItem = null;
+
+function escapeHTML(value=""){
+  return String(value).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",
+    '"':"&quot;","'":"&#039;"
+  }[c]));
+}
+
+function getTitle(item){
+  return item.title ||
+    item.name ||
+    item.attributes?.title?.en ||
+    item.attributes?.title?.["ja-ro"] ||
+    "بدون عنوان";
+}
+
+function getCover(item){
+  return item.cover_url ||
+    item.cover ||
+    item.image ||
+    item.coverUrl ||
+    "";
+}
+
+function getDescription(item){
+  let d = item.description ||
+    item.summary ||
+    item.attributes?.description?.en ||
+    "";
+  if(typeof d === "object") d = d.en || "";
+  return String(d).replace(/<[^>]*>/g,"");
+}
+
+function getStatus(item){
+  return item.status || item.attributes?.status || "غير معروف";
+}
+
+function getYear(item){
+  return item.year || item.startDate?.year ||
+    item.attributes?.year || "";
+}
+
+function getScore(item){
+  return item.score || item.rating || "";
+}
+
+async function searchManga(query){
+  const url = `${API_BASE}/catalog/search?q=${encodeURIComponent(query)}&limit=15`;
+  const response = await fetch(url);
+  if(!response.ok) throw new Error("فشل البحث");
+  const data = await response.json();
+  return Array.isArray(data) ? data :
+    data.results || data.items || data.data || [];
+}
+
+function renderSuggestions(items){
+  suggestions.innerHTML = "";
+  if(!items.length){
+    suggestions.style.display="none";
+    return;
+  }
+
+  items.slice(0,10).forEach(item=>{
+    const row=document.createElement("div");
+    row.className="suggestion";
+    const cover=getCover(item);
+
+    row.innerHTML=`
+      <img src="${escapeHTML(cover)}" onerror="this.style.visibility='hidden'">
+      <div>
+        <strong>${escapeHTML(getTitle(item))}</strong>
+        <div class="small">${escapeHTML(getStatus(item))} ${getYear(item)}</div>
       </div>
-    </section>
+    `;
 
-    <section class="container" id="library">
-      <h2 class="section-title" id="libraryTitle">مكتبة المانهوا</h2>
+    row.addEventListener("click",()=>openDetails(item));
+    suggestions.appendChild(row);
+  });
 
-      <div class="filters" aria-label="تصفية حسب حالة المانهوا">
-        <button type="button" class="active" data-filter="all">الكل</button>
-        <button type="button" data-filter="complete">مكتملة</button>
-        <button type="button" data-filter="ongoing">مستمرة</button>
+  suggestions.style.display="block";
+}
+
+function renderResults(items){
+  results.innerHTML="";
+  if(!items.length){
+    searchMessage.textContent="لم نعثر على نتائج.";
+    searchMessage.classList.remove("hidden");
+    return;
+  }
+
+  searchMessage.classList.add("hidden");
+
+  items.forEach(item=>{
+    const card=document.createElement("article");
+    card.className="card";
+    const cover=getCover(item);
+
+    card.innerHTML=`
+      <img src="${escapeHTML(cover)}"
+        onerror="this.style.display='none'"
+        alt="">
+      <div class="card-info">
+        <h3>${escapeHTML(getTitle(item))}</h3>
+        <div class="muted">${escapeHTML(getStatus(item))}</div>
+        ${getScore(item) ? `<span class="badge">⭐ ${escapeHTML(getScore(item))}</span>` : ""}
       </div>
+    `;
 
-      <div class="loading" id="loading">جاري البحث عن الأعمال...</div>
+    card.addEventListener("click",()=>openDetails(item));
+    results.appendChild(card);
+  });
+}
 
-      <div class="grid" id="mangaGrid">
-        <article class="card" data-status="complete">
-          <div class="cover-placeholder">MANGA 01</div>
-          <div class="card-info">
-            <h3>مانهوا تجريبية 01</h3>
-            <p>مكان مخصص لنبذة المانهوا وتصنيفها.</p>
-            <span class="badge">بيانات تجريبية</span>
-          </div>
-        </article>
+searchInput.addEventListener("input",()=>{
+  clearTimeout(searchTimer);
+  const query=searchInput.value.trim();
 
-        <article class="card" data-status="ongoing">
-          <div class="cover-placeholder">MANGA 02</div>
-          <div class="card-info">
-            <h3>مانهوا تجريبية 02</h3>
-            <p>مكان مخصص لنبذة المانهوا وتصنيفها.</p>
-            <span class="badge">بيانات تجريبية</span>
-          </div>
-        </article>
+  if(query.length<2){
+    suggestions.style.display="none";
+    results.innerHTML="";
+    searchMessage.textContent="اكتب اسم المانهوا للبحث.";
+    searchMessage.classList.remove("hidden");
+    return;
+  }
 
-        <article class="card" data-status="complete">
-          <div class="cover-placeholder">MANGA 03</div>
-          <div class="card-info">
-            <h3>مانهوا تجريبية 03</h3>
-            <p>مكان مخصص لنبذة المانهوا وتصنيفها.</p>
-            <span class="badge">بيانات تجريبية</span>
-          </div>
-        </article>
+  searchTimer=setTimeout(async()=>{
+    searchMessage.textContent="جاري البحث...";
+    searchMessage.classList.remove("hidden");
 
-        <article class="card" data-status="ongoing">
-          <div class="cover-placeholder">MANGA 04</div>
-          <div class="card-info">
-            <h3>مانهوا تجريبية 04</h3>
-            <p>مكان مخصص لنبذة المانهوا وتصنيفها.</p>
-            <span class="badge">بيانات تجريبية</span>
-          </div>
-        </article>
-      </div>
+    try{
+      currentItems=await searchManga(query);
+      renderSuggestions(currentItems);
+      renderResults(currentItems);
+    }catch(error){
+      suggestions.style.display="none";
+      searchMessage.textContent="تعذر الاتصال بمصدر البحث. حاول مجدداً.";
+    }
+  },350);
+});
 
-      <p class="empty" id="emptyMessage">لا توجد نتائج مطابقة للبحث.</p>
-    </section>
-  </main>
+searchInput.addEventListener("keydown",async e=>{
+  if(e.key==="Enter"){
+    suggestions.style.display="none";
+    if(currentItems.length) renderResults(currentItems);
+  }
+});
 
-  <footer id="about">
-    MANGA AI TRANSLATOR
-    <br>
-    منصة لاكتشاف وقراءة المانهوا باللغة العربية
-  </footer>
+document.addEventListener("click",e=>{
+  if(!e.target.closest(".searchbox")){
+    suggestions.style.display="none";
+  }
+});
 
-  <script>
-    const API_URL = "https://manga-ai-translator.onrender.com/api/v1/catalog/search";
+function showDetails(){
+  document.getElementById("home").style.display="none";
+  document.getElementById("details").style.display="block";
+  window.scrollTo(0,0);
+}
 
-    const searchInput = document.getElementById("searchInput");
-    const searchForm = document.getElementById("searchForm");
-    const suggestions = document.getElementById("suggestions");
-    const mangaGrid = document.getElementById("mangaGrid");
-    const emptyMessage = document.getElementById("emptyMessage");
-    const loading = document.getElementById("loading");
-    const filterButtons = document.querySelectorAll("[data-filter]");
-    const libraryTitle = document.getElementById("libraryTitle");
+function goBack(){
+  document.getElementById("details").style.display="none";
+  document.getElementById("home").style.display="block";
+  window.scrollTo(0,0);
+}
 
-    let currentStatus = "all";
-    let debounceTimer;
-    let requestNumber = 0;
-    let currentResults = [];
+async function openDetails(item){
+  selectedItem=item;
+  suggestions.style.display="none";
+  showDetails();
 
-    function getTitle(item) {
-      return item.title?.english ||
-             item.title?.romaji ||
-             item.title?.native ||
-             "عنوان غير معروف";
+  const title=getTitle(item);
+  const cover=getCover(item);
+
+  document.getElementById("detailTitle").textContent=title;
+  document.getElementById("detailOriginal").textContent=
+    item.original_title || item.originalTitle || "";
+  document.getElementById("detailCover").src=cover;
+  document.getElementById("detailDescription").textContent=
+    getDescription(item) || "لا تتوفر نبذة لهذا العمل حالياً.";
+
+  document.getElementById("detailBadges").innerHTML=`
+    <span class="badge">${escapeHTML(getStatus(item))}</span>
+    ${getYear(item) ? `<span class="badge">${escapeHTML(getYear(item))}</span>` : ""}
+    ${getScore(item) ? `<span class="badge">⭐ ${escapeHTML(getScore(item))}</span>` : ""}
+  `;
+
+  document.getElementById("detailSource").textContent=
+    "المصدر: " + (item.source || item.provider || "كتالوج الأعمال");
+
+  document.getElementById("languageList").innerHTML="";
+  document.getElementById("chapterList").innerHTML="";
+  document.getElementById("chapterMessage").textContent="جاري فحص الفصول...";
+
+  if(!String(item.id || "").startsWith("mangadex-")){
+    document.getElementById("chapterMessage").textContent=
+      "فحص الفصول لهذا المصدر غير متاح حالياً. لا يعني ذلك أن العمل بلا فصول.";
+    return;
+  }
+
+  const mangaId=String(item.id).replace("mangadex-","");
+  await loadChapters(mangaId);
+}
+
+const languageNames={
+  ar:"العربية",en:"الإنجليزية",fr:"الفرنسية",
+  ko:"الكورية",ja:"اليابانية",zh:"الصينية",
+  es:"الإسبانية",pt-br:"البرتغالية",
+  ru:"الروسية",de:"الألمانية",it:"الإيطالية",
+  tr:"التركية",id:"الإندونيسية",th:"التايلاندية",
+  vi:"الفيتنامية"
+};
+
+async function loadChapters(mangaId){
+  const message=document.getElementById("chapterMessage");
+  const list=document.getElementById("chapterList");
+  const languages=document.getElementById("languageList");
+
+  try{
+    const response=await fetch(
+      `${API_BASE}/manga/${encodeURIComponent(mangaId)}/chapters`
+    );
+
+    if(!response.ok) throw new Error("تعذر جلب الفصول");
+
+    const data=await response.json();
+    const chapters=data.chapters || data.results || [];
+    const available=data.available_languages || [];
+
+    languages.innerHTML="";
+    available.forEach(lang=>{
+      const code=typeof lang==="string" ? lang : lang.code || lang.language;
+      const name=languageNames[code] || code;
+      const tag=document.createElement("span");
+      tag.className="language";
+      tag.textContent=name;
+      languages.appendChild(tag);
+    });
+
+    list.innerHTML="";
+
+    if(!chapters.length){
+      message.textContent=
+        "لم تُرجع خدمة الفصول بيانات لهذا العمل حالياً.";
+      return;
     }
 
-    function getYear(item) {
-      return item.release_date?.year ||
-             (typeof item.release_date === "number" ? item.release_date : null) ||
-             "غير معروف";
-    }
+    message.textContent=`عدد الفصول المعروضة: ${chapters.length}`;
 
-    function getStatus(item) {
-      const status = String(item.status || "").toLowerCase();
+    chapters.forEach(ch=>{
+      const row=document.createElement("div");
+      row.className="chapter";
 
-      if (["finished", "completed", "complete"].includes(status)) {
-        return "complete";
-      }
+      const chapterName=ch.chapter || ch.chapter_number ||
+        ch.title || "فصل";
+      const lang=ch.language || ch.translatedLanguage || "";
+      const langName=languageNames[lang] || lang;
 
-      if (["releasing", "ongoing", "publishing"].includes(status)) {
-        return "ongoing";
-      }
-
-      return "unknown";
-    }
-
-    function getStatusText(item) {
-      const status = getStatus(item);
-
-      if (status === "complete") return "مكتملة";
-      if (status === "ongoing") return "مستمرة";
-      return "الحالة غير معروفة";
-    }
-
-    function safeText(value) {
-      return String(value ?? "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-    }
-
-    async function searchAPI(query, limit = 10) {
-      const url = `${API_URL}?q=${encodeURIComponent(query)}&limit=${limit}`;
-
-      const response = await fetch(url);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      return await response.json();
-    }
-
-    function showSuggestionMessage(message) {
-      suggestions.innerHTML =
-        `<div class="suggestion-message">${safeText(message)}</div>`;
-      suggestions.classList.add("show");
-    }
-
-    function renderSuggestions(results) {
-      if (!results.length) {
-        showSuggestionMessage("لم نجد أعمالاً مطابقة.");
-        return;
-      }
-
-      suggestions.innerHTML = results.slice(0, 7).map((item, index) => {
-        const title = getTitle(item);
-        const cover = item.cover || "";
-        const year = getYear(item);
-        const status = getStatusText(item);
-        const rating = item.rating != null ? item.rating : "—";
-
-        return `
-          <button
-            type="button"
-            class="suggestion"
-            data-index="${index}"
-            role="option"
-          >
-            ${
-              cover
-                ? `<img src="${safeText(cover)}" alt="" loading="lazy">`
-                : `<div class="cover-placeholder" style="width:53px;height:70px;font-size:10px">MANGA</div>`
-            }
-            <span class="suggestion-info">
-              <span class="suggestion-title">${safeText(title)}</span>
-              <span class="suggestion-meta">
-                ${safeText(year)} · ${safeText(status)} · ⭐ ${safeText(rating)}
-              </span>
-            </span>
-          </button>
-        `;
-      }).join("");
-
-      suggestions.classList.add("show");
-
-      suggestions.querySelectorAll(".suggestion").forEach(button => {
-        button.addEventListener("click", () => {
-          const item = results[Number(button.dataset.index)];
-          searchInput.value = getTitle(item);
-          suggestions.classList.remove("show");
-          renderResults([item]);
-          libraryTitle.textContent = "نتيجة البحث";
-          document.getElementById("library").scrollIntoView({
-            behavior: "smooth"
-          });
-        });
-      });
-    }
-
-    async function loadSuggestions() {
-      const query = searchInput.value.trim();
-      const thisRequest = ++requestNumber;
-
-      if (query.length < 2) {
-        suggestions.classList.remove("show");
-        suggestions.innerHTML = "";
-        return;
-      }
-
-      showSuggestionMessage("جاري البحث...");
-
-      try {
-        const data = await searchAPI(query, 10);
-
-        if (thisRequest !== requestNumber) return;
-
-        currentResults = data.results || [];
-        renderSuggestions(currentResults);
-
-      } catch (error) {
-        if (thisRequest !== requestNumber) return;
-
-        showSuggestionMessage(
-          "تعذر الاتصال بخدمة البحث. حاول مرة أخرى."
-        );
-
-        console.error("Autocomplete error:", error);
-      }
-    }
-
-    function createCard(item) {
-      const title = getTitle(item);
-      const cover = item.cover || "";
-      const description = item.description || "لا توجد نبذة متاحة حالياً.";
-      const year = getYear(item);
-      const status = getStatusText(item);
-      const rating = item.rating != null ? item.rating : "غير متوفر";
-      const chapters = item.chapters != null
-        ? `${item.chapters} فصل`
-        : "عدد الفصول غير معروف";
-
-      const card = document.createElement("article");
-      card.className = "card";
-      card.dataset.status = getStatus(item);
-
-      const imageHTML = cover
-        ? `<img class="cover" src="${safeText(cover)}" alt="${safeText(title)}" loading="lazy">`
-        : `<div class="cover-placeholder">${safeText(title)}</div>`;
-
-      const linkHTML = item.url
-        ? `<a class="card-link" href="${safeText(item.url)}" target="_blank" rel="noopener noreferrer">عرض صفحة العمل ↗</a>`
-        : "";
-
-      card.innerHTML = `
-        ${imageHTML}
-        <div class="card-info">
-          <h3>${safeText(title)}</h3>
-          <p>${safeText(description.slice(0, 160))}</p>
-          <span class="badge">
-            ${safeText(status)} · ${safeText(year)}
-          </span>
-          <br>
-          <span class="suggestion-meta">
-            ⭐ ${safeText(rating)} · ${safeText(chapters)}
-          </span>
-          ${linkHTML}
+      row.innerHTML=`
+        <div>
+          <strong>الفصل ${escapeHTML(chapterName)}</strong>
+          <div class="small">${escapeHTML(ch.title || "")}</div>
         </div>
+        <span class="badge">${escapeHTML(langName)}</span>
       `;
 
-      return card;
-    }
-
-    function applyFilters() {
-      const cards = mangaGrid.querySelectorAll(".card");
-      let visibleCount = 0;
-
-      cards.forEach(card => {
-        const matchesStatus =
-          currentStatus === "all" ||
-          card.dataset.status === currentStatus;
-
-        card.hidden = !matchesStatus;
-
-        if (matchesStatus) visibleCount++;
-      });
-
-      emptyMessage.style.display =
-        visibleCount === 0 ? "block" : "none";
-    }
-
-    function renderResults(results) {
-      mangaGrid.innerHTML = "";
-
-      results.forEach(item => {
-        mangaGrid.appendChild(createCard(item));
-      });
-
-      applyFilters();
-    }
-
-    async function performSearch() {
-      const query = searchInput.value.trim();
-
-      if (!query) return;
-
-      suggestions.classList.remove("show");
-      loading.style.display = "block";
-      emptyMessage.style.display = "none";
-      libraryTitle.textContent = "نتائج البحث";
-
-      try {
-        const data = await searchAPI(query, 20);
-        renderResults(data.results || []);
-
-        if (!data.results || data.results.length === 0) {
-          emptyMessage.textContent = "لم نعثر على أعمال مطابقة.";
-        } else {
-          emptyMessage.textContent = "لا توجد نتائج مطابقة للبحث.";
-        }
-
-      } catch (error) {
-        console.error("Search error:", error);
-        mangaGrid.innerHTML = "";
-        emptyMessage.textContent =
-          "تعذر الاتصال بخدمة البحث. تحقق من الاتصال وحاول مجدداً.";
-        emptyMessage.style.display = "block";
-
-      } finally {
-        loading.style.display = "none";
-      }
-    }
-
-    searchInput.addEventListener("input", () => {
-      clearTimeout(debounceTimer);
-
-      debounceTimer = setTimeout(loadSuggestions, 350);
+      list.appendChild(row);
     });
 
-    searchForm.addEventListener("submit", event => {
-      event.preventDefault();
-      performSearch();
-    });
+  }catch(error){
+    message.textContent=
+      "تعذر تحميل الفصول حالياً. جرّب مرة أخرى لاحقاً.";
+  }
+}
+</script>
 
-    document.addEventListener("click", event => {
-      if (!event.target.closest(".search-wrap")) {
-        suggestions.classList.remove("show");
-      }
-    });
-
-    filterButtons.forEach(button => {
-      button.addEventListener("click", () => {
-        currentStatus = button.dataset.filter;
-
-        filterButtons.forEach(item => {
-          item.classList.toggle("active", item === button);
-        });
-
-        applyFilters();
-      });
-    });
-  </script>
 </body>
 </html>

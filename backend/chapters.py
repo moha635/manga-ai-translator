@@ -180,3 +180,109 @@ async def get_manga_chapters(
         "available_languages": available,
         "languages": results,
     }
+
+
+# ==================================================
+# FULL CHAPTER LIST
+# ==================================================
+
+@router.get("/manga/{manga_id}/chapter-list")
+async def get_chapter_list(
+    manga_id: str,
+    language: str = Query(default="ar"),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+
+    if language not in LANGUAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported language: {language}",
+        )
+
+    params = {
+        "translatedLanguage[]": language,
+        "limit": limit,
+        "offset": offset,
+        "order[chapter]": "asc",
+        "includes[]": ["scanlation_group"],
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            headers={
+                "User-Agent": "MangaAITranslator/4.0",
+                "Accept": "application/json",
+            },
+            timeout=30,
+        ) as client:
+
+            response = await client.get(
+                f"{BASE_URL}/manga/{manga_id}/feed",
+                params=params,
+            )
+
+        if response.status_code != 200:
+            logger.error(
+                "Chapter list error %s: %s",
+                response.status_code,
+                response.text[:500],
+            )
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="MangaDex chapter request failed",
+            )
+
+        data = response.json()
+
+        chapters = []
+
+        for item in data.get("data", []):
+            attr = item.get("attributes", {})
+            chapter_id = item.get("id")
+
+            groups = [
+                relation.get("attributes", {}).get("name")
+                for relation in item.get("relationships", [])
+                if relation.get("type") == "scanlation_group"
+                and relation.get("attributes", {}).get("name")
+            ]
+
+            chapters.append({
+                "id": chapter_id,
+                "chapter": attr.get("chapter"),
+                "title": attr.get("title"),
+                "volume": attr.get("volume"),
+                "language": language,
+                "language_name": LANGUAGES[language],
+                "published_at": attr.get("readableAt"),
+                "pages": attr.get("pages"),
+                "external_url": attr.get("externalUrl"),
+                "scanlation_groups": groups,
+                "url": f"https://mangadex.org/chapter/{chapter_id}",
+            })
+
+        return {
+            "success": True,
+            "manga_id": manga_id,
+            "language": language,
+            "language_name": LANGUAGES[language],
+            "total": data.get("total", 0),
+            "limit": limit,
+            "offset": offset,
+            "next_offset": offset + len(chapters),
+            "chapters": chapters,
+        }
+
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="MangaDex request timeout",
+        )
+
+    except httpx.RequestError:
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to connect to MangaDex",
+        )

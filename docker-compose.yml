@@ -1,0 +1,29 @@
+services:
+  api:
+    build: ./backend
+    container_name: manga_api
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    depends_on:
+      - database
+      - redis
+
+  database:
+    image: postgres:16
+    container_name: manga_database
+    environment:
+      POSTGRES_DB: manga_ai
+      POSTGRES_USER: manga_user
+      POSTGRES_PASSWORD: change_this_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: manga_redis
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

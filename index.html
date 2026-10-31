@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#0b0b12">
   <meta name="description" content="MANGA AI TRANSLATOR - اكتشف المانهوا واقرأها باللغة العربية.">
   <title>MANGA AI TRANSLATOR</title>
+
   <style>
     :root {
       color-scheme: dark;
@@ -20,7 +21,6 @@
     }
 
     * { box-sizing: border-box; }
-
     html { scroll-behavior: smooth; }
 
     body {
@@ -63,7 +63,7 @@
       font-size: 14px;
     }
 
-    nav a:hover, nav a:focus-visible { color: var(--accent); }
+    nav a:hover { color: var(--accent); }
 
     .hero {
       padding: 72px 20px 54px;
@@ -85,10 +85,16 @@
       color: var(--muted);
     }
 
-    .search {
-      display: flex;
+    .search-wrap {
+      position: relative;
       width: min(100%, 620px);
       margin: 0 auto;
+      z-index: 20;
+    }
+
+    .search {
+      display: flex;
+      width: 100%;
       overflow: hidden;
       border: 1px solid #44346b;
       border-radius: 12px;
@@ -118,6 +124,79 @@
     }
 
     .search button:hover { background: #9168e8; }
+
+    .suggestions {
+      display: none;
+      position: absolute;
+      top: calc(100% + 8px);
+      right: 0;
+      left: 0;
+      max-height: 430px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #171622;
+      box-shadow: 0 12px 35px #0009;
+      text-align: right;
+    }
+
+    .suggestions.show { display: block; }
+
+    .suggestion {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px;
+      border: 0;
+      border-bottom: 1px solid #302a43;
+      color: white;
+      background: transparent;
+      text-align: right;
+      cursor: pointer;
+    }
+
+    .suggestion:hover,
+    .suggestion:focus {
+      background: #29233b;
+      outline: none;
+    }
+
+    .suggestion img {
+      width: 53px;
+      height: 70px;
+      flex-shrink: 0;
+      object-fit: cover;
+      border-radius: 6px;
+      background: #30234d;
+    }
+
+    .suggestion-info {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .suggestion-title {
+      display: block;
+      font-size: 14px;
+      font-weight: bold;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .suggestion-meta {
+      display: block;
+      margin-top: 4px;
+      color: #aaa;
+      font-size: 11px;
+    }
+
+    .suggestion-message {
+      padding: 16px;
+      color: #aaa;
+      font-size: 13px;
+      text-align: center;
+    }
 
     .container {
       width: min(1200px, 100%);
@@ -175,15 +254,23 @@
     }
 
     .cover {
-      min-height: 205px;
+      width: 100%;
+      height: 245px;
+      display: block;
+      object-fit: cover;
+      background: linear-gradient(145deg, #39245f, #151322);
+    }
+
+    .cover-placeholder {
+      height: 245px;
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 12px;
       color: #e8ddff;
       background: linear-gradient(145deg, #39245f, #151322);
-      font-size: 24px;
-      font-weight: 800;
+      font-size: 22px;
+      font-weight: bold;
       text-align: center;
     }
 
@@ -211,10 +298,25 @@
       font-size: 11px;
     }
 
+    .card-link {
+      display: inline-block;
+      margin-top: 12px;
+      color: var(--accent);
+      font-size: 12px;
+      text-decoration: none;
+    }
+
     .empty {
       display: none;
       padding: 28px 10px;
       color: var(--muted);
+      text-align: center;
+    }
+
+    .loading {
+      display: none;
+      padding: 20px;
+      color: var(--accent);
       text-align: center;
     }
 
@@ -237,13 +339,14 @@
       header { padding: 14px 5%; }
       nav { display: none; }
       .container { padding: 30px 5%; }
-      .cover { min-height: 155px; font-size: 20px; }
+      .cover, .cover-placeholder { height: 190px; }
       .card-info { padding: 10px; }
       .card h3 { font-size: 14px; }
       .search button { padding: 0 16px; }
     }
   </style>
 </head>
+
 <body>
   <header>
     <div class="logo">MANGA <span>AI</span></div>
@@ -258,19 +361,25 @@
     <section class="hero">
       <h1>عالم المانهوا <span>بالعربية</span></h1>
       <p>اكتشف المانهوا المفضلة لديك، واقرأ قصصك باللغة العربية بمساعدة الذكاء الاصطناعي.</p>
-      <form class="search" id="searchForm" role="search">
-        <input
-          id="searchInput"
-          type="search"
-          placeholder="ابحث عن اسم المانهوا..."
-          aria-label="ابحث عن اسم المانهوا"
-        >
-        <button type="submit">بحث</button>
-      </form>
+
+      <div class="search-wrap">
+        <form class="search" id="searchForm" role="search">
+          <input
+            id="searchInput"
+            type="search"
+            placeholder="ابحث عن اسم المانهوا..."
+            aria-label="ابحث عن اسم المانهوا"
+            autocomplete="off"
+          >
+          <button type="submit">بحث</button>
+        </form>
+
+        <div class="suggestions" id="suggestions" role="listbox"></div>
+      </div>
     </section>
 
     <section class="container" id="library">
-      <h2 class="section-title">مكتبة المانهوا</h2>
+      <h2 class="section-title" id="libraryTitle">مكتبة المانهوا</h2>
 
       <div class="filters" aria-label="تصفية حسب حالة المانهوا">
         <button type="button" class="active" data-filter="all">الكل</button>
@@ -278,105 +387,347 @@
         <button type="button" data-filter="ongoing">مستمرة</button>
       </div>
 
+      <div class="loading" id="loading">جاري البحث عن الأعمال...</div>
+
       <div class="grid" id="mangaGrid">
         <article class="card" data-status="complete">
-          <div class="cover">MANGA 01</div>
+          <div class="cover-placeholder">MANGA 01</div>
           <div class="card-info">
             <h3>مانهوا تجريبية 01</h3>
             <p>مكان مخصص لنبذة المانهوا وتصنيفها.</p>
-            <span class="badge">مكتملة · بيانات تجريبية</span>
+            <span class="badge">بيانات تجريبية</span>
           </div>
         </article>
 
         <article class="card" data-status="ongoing">
-          <div class="cover">MANGA 02</div>
+          <div class="cover-placeholder">MANGA 02</div>
           <div class="card-info">
             <h3>مانهوا تجريبية 02</h3>
             <p>مكان مخصص لنبذة المانهوا وتصنيفها.</p>
-            <span class="badge">مستمرة · بيانات تجريبية</span>
+            <span class="badge">بيانات تجريبية</span>
           </div>
         </article>
 
         <article class="card" data-status="complete">
-          <div class="cover">MANGA 03</div>
+          <div class="cover-placeholder">MANGA 03</div>
           <div class="card-info">
             <h3>مانهوا تجريبية 03</h3>
             <p>مكان مخصص لنبذة المانهوا وتصنيفها.</p>
-            <span class="badge">مكتملة · بيانات تجريبية</span>
+            <span class="badge">بيانات تجريبية</span>
           </div>
         </article>
 
         <article class="card" data-status="ongoing">
-          <div class="cover">MANGA 04</div>
+          <div class="cover-placeholder">MANGA 04</div>
           <div class="card-info">
             <h3>مانهوا تجريبية 04</h3>
             <p>مكان مخصص لنبذة المانهوا وتصنيفها.</p>
-            <span class="badge">مستمرة · بيانات تجريبية</span>
+            <span class="badge">بيانات تجريبية</span>
           </div>
         </article>
       </div>
 
-      <p class="empty" id="emptyMessage" role="status">لا توجد نتائج مطابقة للبحث.</p>
+      <p class="empty" id="emptyMessage">لا توجد نتائج مطابقة للبحث.</p>
     </section>
   </main>
 
   <footer id="about">
     MANGA AI TRANSLATOR
     <br>
-    منصة لقراءة المانهوا باللغة العربية
+    منصة لاكتشاف وقراءة المانهوا باللغة العربية
   </footer>
 
   <script>
+    const API_URL = "https://manga-ai-translator.onrender.com/api/v1/catalog/search";
+
     const searchInput = document.getElementById("searchInput");
     const searchForm = document.getElementById("searchForm");
-    const filterButtons = document.querySelectorAll("[data-filter]");
-    const cards = document.querySelectorAll(".card");
+    const suggestions = document.getElementById("suggestions");
+    const mangaGrid = document.getElementById("mangaGrid");
     const emptyMessage = document.getElementById("emptyMessage");
+    const loading = document.getElementById("loading");
+    const filterButtons = document.querySelectorAll("[data-filter]");
+    const libraryTitle = document.getElementById("libraryTitle");
 
     let currentStatus = "all";
+    let debounceTimer;
+    let requestNumber = 0;
+    let currentResults = [];
 
-    function updateCards() {
-      const query = searchInput.value.trim().toLocaleLowerCase("ar");
-      let visibleCount = 0;
-
-      cards.forEach((card) => {
-        const title = card.querySelector("h3").textContent
-          .trim()
-          .toLocaleLowerCase("ar");
-
-        const matchesSearch = title.includes(query);
-        const matchesStatus =
-          currentStatus === "all" || card.dataset.status === currentStatus;
-        const shouldShow = matchesSearch && matchesStatus;
-
-        card.hidden = !shouldShow;
-
-        if (shouldShow) visibleCount += 1;
-      });
-
-      emptyMessage.style.display = visibleCount === 0 ? "block" : "none";
+    function getTitle(item) {
+      return item.title?.english ||
+             item.title?.romaji ||
+             item.title?.native ||
+             "عنوان غير معروف";
     }
 
-    searchForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-      updateCards();
+    function getYear(item) {
+      return item.release_date?.year ||
+             (typeof item.release_date === "number" ? item.release_date : null) ||
+             "غير معروف";
+    }
+
+    function getStatus(item) {
+      const status = String(item.status || "").toLowerCase();
+
+      if (["finished", "completed", "complete"].includes(status)) {
+        return "complete";
+      }
+
+      if (["releasing", "ongoing", "publishing"].includes(status)) {
+        return "ongoing";
+      }
+
+      return "unknown";
+    }
+
+    function getStatusText(item) {
+      const status = getStatus(item);
+
+      if (status === "complete") return "مكتملة";
+      if (status === "ongoing") return "مستمرة";
+      return "الحالة غير معروفة";
+    }
+
+    function safeText(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    async function searchAPI(query, limit = 10) {
+      const url = `${API_URL}?q=${encodeURIComponent(query)}&limit=${limit}`;
+
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      return await response.json();
+    }
+
+    function showSuggestionMessage(message) {
+      suggestions.innerHTML =
+        `<div class="suggestion-message">${safeText(message)}</div>`;
+      suggestions.classList.add("show");
+    }
+
+    function renderSuggestions(results) {
+      if (!results.length) {
+        showSuggestionMessage("لم نجد أعمالاً مطابقة.");
+        return;
+      }
+
+      suggestions.innerHTML = results.slice(0, 7).map((item, index) => {
+        const title = getTitle(item);
+        const cover = item.cover || "";
+        const year = getYear(item);
+        const status = getStatusText(item);
+        const rating = item.rating != null ? item.rating : "—";
+
+        return `
+          <button
+            type="button"
+            class="suggestion"
+            data-index="${index}"
+            role="option"
+          >
+            ${
+              cover
+                ? `<img src="${safeText(cover)}" alt="" loading="lazy">`
+                : `<div class="cover-placeholder" style="width:53px;height:70px;font-size:10px">MANGA</div>`
+            }
+            <span class="suggestion-info">
+              <span class="suggestion-title">${safeText(title)}</span>
+              <span class="suggestion-meta">
+                ${safeText(year)} · ${safeText(status)} · ⭐ ${safeText(rating)}
+              </span>
+            </span>
+          </button>
+        `;
+      }).join("");
+
+      suggestions.classList.add("show");
+
+      suggestions.querySelectorAll(".suggestion").forEach(button => {
+        button.addEventListener("click", () => {
+          const item = results[Number(button.dataset.index)];
+          searchInput.value = getTitle(item);
+          suggestions.classList.remove("show");
+          renderResults([item]);
+          libraryTitle.textContent = "نتيجة البحث";
+          document.getElementById("library").scrollIntoView({
+            behavior: "smooth"
+          });
+        });
+      });
+    }
+
+    async function loadSuggestions() {
+      const query = searchInput.value.trim();
+      const thisRequest = ++requestNumber;
+
+      if (query.length < 2) {
+        suggestions.classList.remove("show");
+        suggestions.innerHTML = "";
+        return;
+      }
+
+      showSuggestionMessage("جاري البحث...");
+
+      try {
+        const data = await searchAPI(query, 10);
+
+        if (thisRequest !== requestNumber) return;
+
+        currentResults = data.results || [];
+        renderSuggestions(currentResults);
+
+      } catch (error) {
+        if (thisRequest !== requestNumber) return;
+
+        showSuggestionMessage(
+          "تعذر الاتصال بخدمة البحث. حاول مرة أخرى."
+        );
+
+        console.error("Autocomplete error:", error);
+      }
+    }
+
+    function createCard(item) {
+      const title = getTitle(item);
+      const cover = item.cover || "";
+      const description = item.description || "لا توجد نبذة متاحة حالياً.";
+      const year = getYear(item);
+      const status = getStatusText(item);
+      const rating = item.rating != null ? item.rating : "غير متوفر";
+      const chapters = item.chapters != null
+        ? `${item.chapters} فصل`
+        : "عدد الفصول غير معروف";
+
+      const card = document.createElement("article");
+      card.className = "card";
+      card.dataset.status = getStatus(item);
+
+      const imageHTML = cover
+        ? `<img class="cover" src="${safeText(cover)}" alt="${safeText(title)}" loading="lazy">`
+        : `<div class="cover-placeholder">${safeText(title)}</div>`;
+
+      const linkHTML = item.url
+        ? `<a class="card-link" href="${safeText(item.url)}" target="_blank" rel="noopener noreferrer">عرض صفحة العمل ↗</a>`
+        : "";
+
+      card.innerHTML = `
+        ${imageHTML}
+        <div class="card-info">
+          <h3>${safeText(title)}</h3>
+          <p>${safeText(description.slice(0, 160))}</p>
+          <span class="badge">
+            ${safeText(status)} · ${safeText(year)}
+          </span>
+          <br>
+          <span class="suggestion-meta">
+            ⭐ ${safeText(rating)} · ${safeText(chapters)}
+          </span>
+          ${linkHTML}
+        </div>
+      `;
+
+      return card;
+    }
+
+    function applyFilters() {
+      const cards = mangaGrid.querySelectorAll(".card");
+      let visibleCount = 0;
+
+      cards.forEach(card => {
+        const matchesStatus =
+          currentStatus === "all" ||
+          card.dataset.status === currentStatus;
+
+        card.hidden = !matchesStatus;
+
+        if (matchesStatus) visibleCount++;
+      });
+
+      emptyMessage.style.display =
+        visibleCount === 0 ? "block" : "none";
+    }
+
+    function renderResults(results) {
+      mangaGrid.innerHTML = "";
+
+      results.forEach(item => {
+        mangaGrid.appendChild(createCard(item));
+      });
+
+      applyFilters();
+    }
+
+    async function performSearch() {
+      const query = searchInput.value.trim();
+
+      if (!query) return;
+
+      suggestions.classList.remove("show");
+      loading.style.display = "block";
+      emptyMessage.style.display = "none";
+      libraryTitle.textContent = "نتائج البحث";
+
+      try {
+        const data = await searchAPI(query, 20);
+        renderResults(data.results || []);
+
+        if (!data.results || data.results.length === 0) {
+          emptyMessage.textContent = "لم نعثر على أعمال مطابقة.";
+        } else {
+          emptyMessage.textContent = "لا توجد نتائج مطابقة للبحث.";
+        }
+
+      } catch (error) {
+        console.error("Search error:", error);
+        mangaGrid.innerHTML = "";
+        emptyMessage.textContent =
+          "تعذر الاتصال بخدمة البحث. تحقق من الاتصال وحاول مجدداً.";
+        emptyMessage.style.display = "block";
+
+      } finally {
+        loading.style.display = "none";
+      }
+    }
+
+    searchInput.addEventListener("input", () => {
+      clearTimeout(debounceTimer);
+
+      debounceTimer = setTimeout(loadSuggestions, 350);
     });
 
-    searchInput.addEventListener("input", updateCards);
+    searchForm.addEventListener("submit", event => {
+      event.preventDefault();
+      performSearch();
+    });
 
-    filterButtons.forEach((button) => {
+    document.addEventListener("click", event => {
+      if (!event.target.closest(".search-wrap")) {
+        suggestions.classList.remove("show");
+      }
+    });
+
+    filterButtons.forEach(button => {
       button.addEventListener("click", () => {
         currentStatus = button.dataset.filter;
 
-        filterButtons.forEach((item) => {
+        filterButtons.forEach(item => {
           item.classList.toggle("active", item === button);
         });
 
-        updateCards();
+        applyFilters();
       });
     });
-
-    updateCards();
   </script>
 </body>
 </html>

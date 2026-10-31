@@ -14,12 +14,9 @@ from chapters import router as chapters_router
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("manga-ai")
 
-APP_VERSION = "4.2.1"
+APP_VERSION = "4.3.0"
 
-app = FastAPI(
-    title="Manga AI Translator",
-    version=APP_VERSION
-)
+app = FastAPI(title="Manga AI Translator", version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,27 +27,18 @@ app.add_middleware(
 
 app.include_router(chapters_router)
 
-
 ANILIST_URL = "https://graphql.anilist.co"
 MANGADEX_URL = "https://api.mangadex.org"
 MANGABAKA_URL = "https://api.mangabaka.org/v2"
-
 
 ANILIST_QUERY = """
 query ($search: String!, $perPage: Int!) {
   Page(perPage: $perPage) {
     media(search: $search, type: MANGA, sort: SEARCH_MATCH) {
       id
-      title {
-        romaji
-        english
-        native
-      }
+      title { romaji english native }
       description(asHtml: false)
-      coverImage {
-        large
-        extraLarge
-      }
+      coverImage { large extraLarge }
       averageScore
       popularity
       status
@@ -58,11 +46,7 @@ query ($search: String!, $perPage: Int!) {
       volumes
       genres
       countryOfOrigin
-      startDate {
-        year
-        month
-        day
-      }
+      startDate { year month day }
       siteUrl
       format
       isAdult
@@ -77,82 +61,68 @@ query ($search: String!, $perPage: Int!) {
 # --------------------------------------------------
 
 def safe_text(value: Any) -> str:
-    if value is None:
+    if value is None or isinstance(value, (dict, list)):
         return ""
-
-    if isinstance(value, (dict, list)):
-        return ""
-
     return str(value).strip()
 
 
 def safe_number(value: Any):
     if isinstance(value, bool):
         return None
-
     if isinstance(value, (int, float)):
         return value
-
     if isinstance(value, str):
         try:
             return float(value)
         except ValueError:
             return None
-
     return None
 
 
 def popularity_number(value: Any) -> float:
-    """
-    MangaBaka popularity may be a dictionary.
-    Extract a usable numeric value safely.
-    """
-
     direct = safe_number(value)
-
     if direct is not None:
         return direct
 
     if isinstance(value, dict):
-        preferred_keys = [
-            "global",
-            "all",
-            "rank",
-            "total",
-            "value"
-        ]
-
-        for key in preferred_keys:
+        for key in ("score", "value", "popularity"):
             number = safe_number(value.get(key))
-
             if number is not None:
                 return number
-
-    return 0
+    return 0.0
 
 
 def normalize_name(value: Any) -> str:
     text = safe_text(value).casefold()
-
     text = unicodedata.normalize("NFKC", text)
-
     text = re.sub(r"[^\w\s]", " ", text)
-
     return " ".join(text.split())
 
 
-def first_title(titles, language="en"):
+def title_values(item: dict) -> list[str]:
+    titles = item.get("title") or {}
 
     if isinstance(titles, str):
-        return titles
+        values = [titles]
+    elif isinstance(titles, dict):
+        values = list(titles.values())
+    else:
+        values = []
 
+    return list(dict.fromkeys(
+        safe_text(value) for value in values if safe_text(value)
+    ))
+
+
+def first_title(titles, language="en"):
+    if isinstance(titles, str):
+        return titles
     if not isinstance(titles, list):
         return ""
 
     matching = [
         item for item in titles
-        if isinstance(item, dict)
-        and item.get("language") == language
+        if isinstance(item, dict) and item.get("language") == language
     ]
 
     for item in matching:
@@ -161,60 +131,44 @@ def first_title(titles, language="en"):
 
     for item in matching:
         traits = item.get("traits") or []
-
         if isinstance(traits, list) and "official" in traits:
             return safe_text(item.get("title"))
 
     if matching:
         return safe_text(matching[0].get("title"))
-
     return ""
 
 
 def mangabaka_cover(value):
-
     if isinstance(value, str):
         return value
-
     if isinstance(value, dict):
         return (
-            value.get("x350")
-            or value.get("x250")
-            or value.get("x150")
-            or value.get("raw")
+            value.get("x350") or value.get("x250")
+            or value.get("x150") or value.get("raw")
         )
-
     return None
 
 
 def is_novel_format(value: Any) -> bool:
-    manga_format = safe_text(value).casefold()
-
-    return (
-        "novel" in manga_format
-        or "light novel" in manga_format
-    )
+    fmt = safe_text(value).casefold()
+    return "novel" in fmt
 
 
-def normalize_genres(value: Any) -> list:
-
+def normalize_genres(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
 
     genres = []
-
     for item in value:
-
         if isinstance(item, str):
             name = item.strip()
-
         elif isinstance(item, dict):
             name = (
                 safe_text(item.get("name"))
                 or safe_text(item.get("en"))
                 or safe_text(item.get("title"))
             )
-
         else:
             continue
 
@@ -224,48 +178,107 @@ def normalize_genres(value: Any) -> list:
     return list(dict.fromkeys(genres))
 
 
+def is_doujinshi(item: dict) -> bool:
+    title_text = " ".join(title_values(item)).casefold()
+    format_text = safe_text(item.get("format")).casefold()
+    genres = " ".join(item.get("genres") or []).casefold()
+
+    return (
+        "doujinshi" in title_text
+        or "doujinshi" in format_text
+        or "doujinshi" in genres
+    )
+
+
+def title_match_score(item: dict, query: str) -> int:
+    q = normalize_name(query)
+    if not q:
+        return 0
+
+    q_tokens = q.split()
+    best = 0
+
+    for raw_title in title_values(item):
+        name = normalize_name(raw_title)
+        if not name:
+            continue
+
+        if name == q:
+            score = 100
+        elif name.startswith(q):
+            score = 90
+        elif q in name:
+            score = 85
+        else:
+            title_tokens = set(name.split())
+            matched = sum(token in title_tokens for token in q_tokens)
+
+            if matched == len(q_tokens):
+                score = 75
+            elif len(q_tokens) == 1 and matched == 1:
+                score = 65
+            else:
+                score = 0
+
+        best = max(best, score)
+
+    return best
+
+
+def filter_search_results(results: list[dict], query: str) -> list[dict]:
+    filtered = []
+    seen_ids = set()
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+
+        if is_novel_format(item.get("format")):
+            continue
+
+        if is_doujinshi(item):
+            continue
+
+        if title_match_score(item, query) == 0:
+            continue
+
+        item_id = item.get("id")
+
+        if item_id and item_id in seen_ids:
+            continue
+
+        if item_id:
+            seen_ids.add(item_id)
+
+        filtered.append(item)
+
+    return filtered
+
+
 # --------------------------------------------------
 # ANILIST
 # --------------------------------------------------
 
 async def search_anilist(client, query, limit):
-
     response = await client.post(
         ANILIST_URL,
         json={
             "query": ANILIST_QUERY,
-            "variables": {
-                "search": query,
-                "perPage": limit
-            }
-        }
+            "variables": {"search": query, "perPage": limit},
+        },
     )
 
     response.raise_for_status()
-
     payload = response.json()
 
     if payload.get("errors"):
         raise ValueError("AniList returned GraphQL errors")
 
-    media = (
-        payload.get("data", {})
-        .get("Page", {})
-        .get("media", [])
-    )
-
+    media = payload.get("data", {}).get("Page", {}).get("media", [])
     results = []
 
     for item in media:
-
-        if item.get("isAdult"):
-            continue
-
-        manga_format = safe_text(
-            item.get("format")
-        ).upper()
-
-        if is_novel_format(manga_format):
+        if item.get("isAdult") or is_novel_format(item.get("format")):
             continue
 
         title = item.get("title") or {}
@@ -274,45 +287,22 @@ async def search_anilist(client, query, limit):
         results.append({
             "id": f"anilist-{item['id']}",
             "source": "AniList",
-
             "title": {
                 "english": safe_text(title.get("english")),
                 "romaji": safe_text(title.get("romaji")),
-                "native": safe_text(title.get("native"))
+                "native": safe_text(title.get("native")),
             },
-
-            "description": safe_text(
-                item.get("description")
-            ),
-
-            "cover": (
-                cover.get("extraLarge")
-                or cover.get("large")
-            ),
-
-            "rating": safe_number(
-                item.get("averageScore")
-            ),
-
-            "popularity": safe_number(
-                item.get("popularity")
-            ),
-
+            "description": safe_text(item.get("description")),
+            "cover": cover.get("extraLarge") or cover.get("large"),
+            "rating": safe_number(item.get("averageScore")),
+            "popularity": safe_number(item.get("popularity")),
             "status": item.get("status"),
-
             "chapters": item.get("chapters"),
-
-            "genres": normalize_genres(
-                item.get("genres")
-            ),
-
+            "genres": normalize_genres(item.get("genres")),
             "country": item.get("countryOfOrigin"),
-
             "release_date": item.get("startDate"),
-
-            "format": manga_format,
-
-            "url": item.get("siteUrl")
+            "format": safe_text(item.get("format")).upper(),
+            "url": item.get("siteUrl"),
         })
 
     return results
@@ -323,23 +313,20 @@ async def search_anilist(client, query, limit):
 # --------------------------------------------------
 
 async def search_mangadex(client, query, limit):
-
     params = [
         ("title", query),
         ("limit", limit),
         ("includes[]", "cover_art"),
         ("contentRating[]", "safe"),
         ("contentRating[]", "suggestive"),
-        ("order[relevance]", "desc")
+        ("order[relevance]", "desc"),
     ]
 
     response = await client.get(
-        f"{MANGADEX_URL}/manga",
-        params=params
+        f"{MANGADEX_URL}/manga", params=params
     )
 
     response.raise_for_status()
-
     payload = response.json()
 
     if payload.get("result") != "ok":
@@ -348,91 +335,58 @@ async def search_mangadex(client, query, limit):
     results = []
 
     for item in payload.get("data", []):
-
         attributes = item.get("attributes") or {}
-
         titles = attributes.get("title") or {}
 
         cover_file = None
 
         for relation in item.get("relationships", []):
-
             if relation.get("type") == "cover_art":
-
                 cover_file = (
-                    relation.get("attributes", {})
-                    .get("fileName")
+                    relation.get("attributes", {}).get("fileName")
                 )
-
                 break
 
         cover_url = None
 
         if cover_file:
-
             cover_url = (
                 "https://uploads.mangadex.org/covers/"
                 f"{item['id']}/{cover_file}.512.jpg"
             )
 
-        english_title = (
-            titles.get("en")
-            or titles.get("en-us")
-            or ""
-        )
+        english_title = titles.get("en") or titles.get("en-us") or ""
 
         native_title = (
-            titles.get("ko")
-            or titles.get("ja")
-            or titles.get("zh")
-            or ""
+            titles.get("ko") or titles.get("ja") or titles.get("zh") or ""
         )
 
+        genres = normalize_genres([
+            tag.get("attributes", {}).get("name", {}).get("en")
+            for tag in attributes.get("tags", [])
+        ])
+
         results.append({
-
             "id": f"mangadex-{item['id']}",
-
             "source": "MangaDex",
-
             "title": {
                 "english": safe_text(english_title),
-
-                "romaji": safe_text(
-                    next(iter(titles.values()), "")
-                ),
-
-                "native": safe_text(native_title)
+                "romaji": safe_text(next(iter(titles.values()), "")),
+                "native": safe_text(native_title),
             },
-
             "description": safe_text(
                 (attributes.get("description") or {}).get("en")
             ),
-
             "cover": cover_url,
-
             "rating": None,
-
             "popularity": None,
-
             "status": attributes.get("status"),
-
             "chapters": None,
-
-            "genres": normalize_genres([
-                tag.get("attributes", {})
-                .get("name", {})
-                .get("en")
-
-                for tag in attributes.get("tags", [])
-            ]),
-
+            "genres": genres,
             "country": attributes.get("originalLanguage"),
-
             "release_date": attributes.get("year"),
-
             "format": None,
-
-            "url": f"https://mangadex.org/title/{item['id']}"
+            "url": f"https://mangadex.org/title/{item['id']}",
         })
 
     return results
@@ -443,39 +397,33 @@ async def search_mangadex(client, query, limit):
 # --------------------------------------------------
 
 async def search_mangabaka(client, query, limit):
-
     params = [
         ("q", query),
         ("limit", limit),
         ("content_rating", "safe"),
-        ("content_rating", "suggestive")
+        ("content_rating", "suggestive"),
     ]
 
     response = await client.get(
-        f"{MANGABAKA_URL}/series/search",
-        params=params
+        f"{MANGABAKA_URL}/series/search", params=params
     )
 
     response.raise_for_status()
-
     payload = response.json()
 
-    if payload.get("status", response.status_code) != 200:
-        raise ValueError("MangaBaka returned an error")
+    status = payload.get("status")
+
+    if status not in (None, 200, "200", "ok", "success"):
+        raise ValueError(f"MangaBaka returned status: {status}")
 
     results = []
 
     for item in payload.get("data", []):
-
         if not isinstance(item, dict):
             continue
 
-        manga_format = safe_text(
-            item.get("format")
-            or item.get("type")
-        )
+        manga_format = safe_text(item.get("format") or item.get("type"))
 
-        # Exclude novels
         if is_novel_format(manga_format):
             continue
 
@@ -490,11 +438,7 @@ async def search_mangabaka(client, query, limit):
         korean = first_title(titles, "ko")
         chinese = first_title(titles, "zh")
 
-        native = (
-            japanese
-            or korean
-            or chinese
-        )
+        native = japanese or korean or chinese
 
         series_id = item.get("id")
 
@@ -513,50 +457,24 @@ async def search_mangabaka(client, query, limit):
         )
 
         results.append({
-
             "id": f"mangabaka-{series_id}",
-
             "source": "MangaBaka",
-
             "title": {
                 "english": english,
-                "romaji": english,
-                "native": native
+                "romaji": "",
+                "native": native,
             },
-
-            "description": safe_text(
-                item.get("description")
-            ),
-
-            "cover": mangabaka_cover(
-                item.get("cover")
-            ),
-
-            "rating": safe_number(
-                item.get("rating")
-            ),
-
-            "popularity": popularity_number(
-                item.get("popularity")
-            ),
-
+            "description": safe_text(item.get("description")),
+            "cover": mangabaka_cover(item.get("cover")),
+            "rating": safe_number(item.get("rating")),
+            "popularity": popularity_number(item.get("popularity")),
             "status": item.get("status"),
-
             "chapters": chapters,
-
-            "genres": normalize_genres(
-                item.get("genres")
-            ),
-
+            "genres": normalize_genres(item.get("genres")),
             "country": None,
-
             "release_date": release_date,
-
             "format": manga_format,
-
-            "url": (
-                f"https://mangabaka.org/series/{series_id}"
-            )
+            "url": f"https://mangabaka.org/series/{series_id}",
         })
 
     return results
@@ -566,110 +484,72 @@ async def search_mangabaka(client, query, limit):
 # MERGE RESULTS
 # --------------------------------------------------
 
-def merge_results(results):
-
+def merge_results(results: list[dict]) -> list[dict]:
     unique = []
+    source_ids = set()
 
     for item in results:
+        source = item.get("source")
+        item_id = item.get("id")
 
-        titles = item.get("title") or {}
+        source_key = (source, item_id)
+
+        if item_id and source_key in source_ids:
+            continue
+
+        if item_id:
+            source_ids.add(source_key)
 
         names = {
             normalize_name(value)
-
-            for value in titles.values()
-
+            for value in title_values(item)
             if normalize_name(value)
         }
 
         matched = None
 
-        for existing in unique:
+        if names:
+            for existing in unique:
+                if existing.get("source") == source:
+                    continue
 
-            # Never merge two results from the same source.
-            if existing.get("source") == item.get("source"):
-                continue
+                existing_names = {
+                    normalize_name(value)
+                    for value in title_values(existing)
+                    if normalize_name(value)
+                }
 
-            existing_titles = existing.get("title") or {}
-
-            existing_names = {
-                normalize_name(value)
-
-                for value in existing_titles.values()
-
-                if normalize_name(value)
-            }
-
-            # Only exact normalized title matches.
-            if names.intersection(existing_names):
-                matched = existing
-                break
+                if names.intersection(existing_names):
+                    matched = existing
+                    break
 
         if matched is None:
-
             new_item = dict(item)
-
-            new_item["title"] = dict(
-                item.get("title") or {}
-            )
-
-            new_item["genres"] = list(
-                item.get("genres") or []
-            )
-
+            new_item["title"] = dict(item.get("title") or {})
+            new_item["genres"] = list(item.get("genres") or [])
             new_item["other_sources"] = []
-
             unique.append(new_item)
-
             continue
 
-        source = item.get("source")
+        if source and source != matched.get("source"):
+            if source not in matched["other_sources"]:
+                matched["other_sources"].append(source)
 
-        if (
-            source
-            and source != matched.get("source")
-            and source not in matched["other_sources"]
+        for field in (
+            "description", "cover", "rating", "popularity", "status",
+            "chapters", "country", "release_date", "format", "url"
         ):
-            matched["other_sources"].append(source)
+            if matched.get(field) in (None, "") and item.get(field) not in (None, ""):
+                matched[field] = item[field]
 
-        fields = [
-            "description",
-            "cover",
-            "rating",
-            "popularity",
-            "status",
-            "chapters",
-            "country",
-            "release_date",
-            "format",
-            "url"
-        ]
-
-        for field in fields:
-
-            if (
-                matched.get(field) is None
-                or matched.get(field) == ""
-            ):
-
-                if item.get(field) is not None:
-                    matched[field] = item[field]
-
-        for language in (
-            "english",
-            "romaji",
-            "native"
-        ):
-
+        for language in ("english", "romaji", "native"):
             if not matched["title"].get(language):
-
                 matched["title"][language] = (
-                    (item.get("title") or {}).get(language)
+                    (item.get("title") or {}).get(language) or ""
                 )
 
         matched["genres"] = list(dict.fromkeys(
-            (matched.get("genres") or [])
-            + (item.get("genres") or [])
+            (matched.get("genres") or []) + (item.get("genres") or [])
         ))
 
     return unique
@@ -679,51 +559,19 @@ def merge_results(results):
 # RELEVANCE AND SORTING
 # --------------------------------------------------
 
-def calculate_relevance(item, query):
-
-    normalized_query = normalize_name(query)
-
-    titles = item.get("title") or {}
-
-    names = [
-        normalize_name(value)
-
-        for value in titles.values()
-
-        if normalize_name(value)
-    ]
-
-    if not names:
-        return 0
-
-    if normalized_query in names:
-        return 100
-
-    if any(
-        name.startswith(normalized_query)
-        for name in names
-    ):
-        return 80
-
-    if any(
-        normalized_query in name
-        for name in names
-    ):
-        return 60
-
-    return 10
+def calculate_relevance(item: dict, query: str) -> int:
+    return title_match_score(item, query)
 
 
-def sort_results(results, query):
-
+def sort_results(results: list[dict], query: str) -> list[dict]:
     return sorted(
         results,
         key=lambda item: (
             calculate_relevance(item, query),
             safe_number(item.get("rating")) or 0,
-            popularity_number(item.get("popularity"))
+            safe_number(item.get("popularity")) or 0,
         ),
-        reverse=True
+        reverse=True,
     )
 
 
@@ -733,38 +581,27 @@ def sort_results(results, query):
 
 @app.get("/")
 async def home():
-
     return {
         "name": "Manga AI Translator",
-
         "version": APP_VERSION,
-
         "status": "running",
-
-        "sources": [
-            "AniList",
-            "MangaDex",
-            "MangaBaka"
-        ],
-
+        "sources": ["AniList", "MangaDex", "MangaBaka"],
         "features": [
             "catalog_search",
             "chapter_language_detection",
             "multi_source_search",
             "result_merging",
             "novel_filtering",
-            "search_relevance"
-        ]
+            "doujinshi_filtering",
+            "strict_title_matching",
+            "search_relevance",
+        ],
     }
 
 
 @app.get("/health")
 async def health():
-
-    return {
-        "status": "healthy",
-        "version": APP_VERSION
-    }
+    return {"status": "healthy", "version": APP_VERSION}
 
 
 # --------------------------------------------------
@@ -773,24 +610,24 @@ async def health():
 
 @app.get("/api/v1/catalog/search")
 async def catalog_search(
-
-    q: str = Query(
-        ...,
-        min_length=1,
-        max_length=100
-    ),
-
-    limit: int = Query(
-        10,
-        ge=1,
-        le=20
-    )
-
+    q: str = Query(..., min_length=1, max_length=100),
+    limit: int = Query(10, ge=1, le=20),
 ):
+    query = q.strip()
+
+    if not query:
+        return {
+            "query": q,
+            "total": 0,
+            "sources_checked": ["AniList", "MangaDex", "MangaBaka"],
+            "sources_successful": [],
+            "sources_with_errors": [],
+            "results": [],
+        }
 
     headers = {
-        "User-Agent": "MangaAITranslator/4.2.1",
-        "Accept": "application/json"
+        "User-Agent": f"MangaAITranslator/{APP_VERSION}",
+        "Accept": "application/json",
     }
 
     timeout = httpx.Timeout(25.0)
@@ -801,68 +638,36 @@ async def catalog_search(
         follow_redirects=True
     ) as client:
 
-        source_names = [
-            "AniList",
-            "MangaDex",
-            "MangaBaka"
-        ]
+        source_names = ["AniList", "MangaDex", "MangaBaka"]
 
         responses = await asyncio.gather(
-
-            search_anilist(client, q, limit),
-
-            search_mangadex(client, q, limit),
-
-            search_mangabaka(client, q, limit),
-
-            return_exceptions=True
+            search_anilist(client, query, limit),
+            search_mangadex(client, query, limit),
+            search_mangabaka(client, query, limit),
+            return_exceptions=True,
         )
 
     results = []
-
     errors = []
-
     successful_sources = []
 
-    for name, response in zip(
-        source_names,
-        responses
-    ):
-
+    for name, response in zip(source_names, responses):
         if isinstance(response, Exception):
-
-            logger.warning(
-                "%s failed: %s",
-                name,
-                response
-            )
-
+            logger.warning("%s failed: %s", name, response)
             errors.append(name)
-
         else:
-
             successful_sources.append(name)
-
             results.extend(response)
 
-    final_results = merge_results(results)
-
-    final_results = sort_results(
-        final_results,
-        q
-    )
+    relevant_results = filter_search_results(results, query)
+    final_results = merge_results(relevant_results)
+    final_results = sort_results(final_results, query)[:limit]
 
     return {
-
-        "query": q,
-
+        "query": query,
         "total": len(final_results),
-
         "sources_checked": source_names,
-
         "sources_successful": successful_sources,
-
         "sources_with_errors": errors,
-
-        "results": final_results
+        "results": final_results,
     }

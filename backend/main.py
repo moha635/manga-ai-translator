@@ -2161,9 +2161,7 @@ def build_search_response(
         "results": sorted_results[:limit],
         "version": APP_VERSION
     }
-
-
-# ==================================================
+    # ==================================================
 # CATALOG SEARCH
 # ==================================================
 
@@ -2186,7 +2184,7 @@ async def catalog_search(
         limit
     )
 
-    cached = search_cache.get(
+    cached = await search_cache.get(
         cache_key
     )
 
@@ -2241,7 +2239,7 @@ async def catalog_search(
         limit
     )
 
-    search_cache.set(
+    await search_cache.set(
         cache_key,
         response
     )
@@ -2285,7 +2283,7 @@ async def catalog_discover(
         limit
     )
 
-    cached = discovery_cache.get(
+    cached = await discovery_cache.get(
         cache_key
     )
 
@@ -2401,7 +2399,7 @@ async def catalog_discover(
             "version": APP_VERSION
         }
 
-        discovery_cache.set(
+        await discovery_cache.set(
             cache_key,
             response
         )

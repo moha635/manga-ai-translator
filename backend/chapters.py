@@ -501,4 +501,51 @@ async def get_chapter_list(
         chapters = []
 
         for item in data.get("data", []):
-            attr
+                        attr = item.get("attributes", {})
+            chapter_id = item.get("id")
+
+            group = None
+            for relation in item.get("relationships", []):
+                if relation.get("type") == "scanlation_group":
+                    group = relation.get("attributes", {}).get("name")
+                    break
+
+            chapters.append({
+                "id": chapter_id,
+                "chapter": attr.get("chapter"),
+                "title": attr.get("title"),
+                "volume": attr.get("volume"),
+                "language": attr.get("translatedLanguage"),
+                "pages": attr.get("pages"),
+                "published_at": attr.get("readableAt"),
+                "group": group,
+                "url": f"https://mangadex.org/chapter/{chapter_id}",
+            })
+
+        return {
+            "manga_id": manga_id,
+            "mangadex_id": mangadex_id,
+            "language": language,
+            "total": data.get("total", 0),
+            "limit": limit,
+            "offset": offset,
+            "chapters": chapters,
+        }
+
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="MangaDex request timed out",
+        )
+
+    except httpx.HTTPStatusError as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"MangaDex error: {error.response.status_code}",
+        )
+
+    except httpx.RequestError:
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to connect to MangaDex",
+        )

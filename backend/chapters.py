@@ -1,10 +1,11 @@
 """
-Manga AI Translator — Chapters module (corrected version).
+Manga AI Translator — Chapters module
+Corrected version 5.1
 
 - يحافظ على router والمسارات القديمة.
-- MangaDex هو مصدر الفصول الحالي.
-- AniList يُستخدم للمعلومات ومطابقة هوية العمل.
-- Pagination تلقائي مع كشف الدوران.
+- MangaDex هو مصدر الفصول.
+- AniList للمعلومات ومطابقة هوية العمل.
+- Pagination مع كشف الدوران والنتائج الناقصة.
 - Cache وProgress في الذاكرة فقط.
 - لا يحتاج مكتبات إضافية أو قاعدة بيانات.
 """
@@ -18,7 +19,6 @@ import re
 import sys
 import time
 import unicodedata
-import uuid
 
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -46,7 +46,7 @@ MANGADEX_URL = "https://api.mangadex.org"
 ANILIST_URL = "https://graphql.anilist.co"
 
 HEADERS = {
-    "User-Agent": "MangaAITranslator/5.0",
+    "User-Agent": "MangaAITranslator/5.1",
     "Accept": "application/json",
 }
 
@@ -69,6 +69,7 @@ LANGUAGES = {
 }
 
 MAX_LANGUAGES_PER_REQUEST = 200
+
 REQUEST_TIMEOUT = 25.0
 
 HTTP_RETRY_ATTEMPTS = 2
@@ -76,7 +77,11 @@ HTTP_RETRY_BACKOFF = 0.6
 MAX_RETRY_AFTER = 30.0
 
 RETRYABLE_STATUS_CODES = {
-    429, 500, 502, 503, 504
+    429,
+    500,
+    502,
+    503,
+    504,
 }
 
 MAX_FEED_PAGES = 200
@@ -106,26 +111,47 @@ logger = logging.getLogger(__name__)
 
 def _resolve_shared_client() -> Optional[httpx.AsyncClient]:
     """
-    يستعمل HTTP client الموجود في main.py إن كان جاهزاً،
+    استعمال HTTP client الموجود في main.py إن كان جاهزاً،
     دون استيراد main.py وتكوين circular import.
     """
 
-    module = sys.modules.get("main")
+    module_names = (
+        "main",
+        "backend.main",
+    )
 
-    getter = getattr(module, "get_client", None) if module else None
+    for module_name in module_names:
 
-    if not callable(getter):
-        return None
+        module = sys.modules.get(module_name)
 
-    try:
-        client = getter()
-    except Exception:
-        return None
+        if module is None:
+            continue
 
-    if client is None or getattr(client, "is_closed", True):
-        return None
+        getter = getattr(
+            module,
+            "get_client",
+            None,
+        )
 
-    return client
+        if not callable(getter):
+            continue
+
+        try:
+            client = getter()
+
+        except Exception:
+            logger.exception(
+                "Could not retrieve shared HTTP client"
+            )
+            continue
+
+        if (
+            isinstance(client, httpx.AsyncClient)
+            and not client.is_closed
+        ):
+            return client
+
+    return None
 
 
 @asynccontextmanager
@@ -146,14 +172,18 @@ async def _client_context():
         timeout=httpx.Timeout(REQUEST_TIMEOUT),
         follow_redirects=True,
     ) as local:
+
         yield local
 
 
 # ==================================================
-# RETRY / HTTP ERRORS
+# HTTP ERRORS
 # ==================================================
 
 class HttpFailure(Exception):
+    """
+    خطأ موحد لطلبات MangaDex وAniList.
+    """
 
     def __init__(
         self,
@@ -161,15 +191,34 @@ class HttpFailure(Exception):
         status_code: Optional[int] = None,
         retryable: bool = False,
     ):
+
         super().__init__(message)
 
         self.status_code = status_code
         self.retryable = retryable
 
 
+def _http_exception(
+    exc: HttpFailure,
+) -> HTTPException:
+
+    return HTTPException(
+        status_code=exc.status_code or 502,
+        detail=str(exc),
+    )
+
+
+# ==================================================
+# RETRY HELPERS
+# ==================================================
+
 def parse_retry_after(
     value: Optional[str],
 ) -> Optional[float]:
+    """
+    قراءة Retry-After سواء كان عدداً بالثواني
+    أو تاريخ HTTP.
+    """
 
     if not value:
         return None
@@ -177,6 +226,7 @@ def parse_retry_after(
     value = value.strip()
 
     try:
+
         seconds = float(value)
 
         if math.isfinite(seconds):
@@ -186,9 +236,11 @@ def parse_retry_after(
         pass
 
     try:
+
         retry_date = parsedate_to_datetime(value)
 
         if retry_date.tzinfo is None:
+
             retry_date = retry_date.replace(
                 tzinfo=timezone.utc
             )
@@ -204,6 +256,7 @@ def parse_retry_after(
         ValueError,
         OverflowError,
     ):
+
         return None
 
 
@@ -213,8 +266,14 @@ async def _sleep_backoff(
 ) -> None:
 
     if retry_after is not None:
-        delay = min(retry_after, MAX_RETRY_AFTER)
+
+        delay = min(
+            retry_after,
+            MAX_RETRY_AFTER,
+        )
+
     else:
+
         delay = min(
             HTTP_RETRY_BACKOFF * (2 ** attempt),
             MAX_RETRY_AFTER,
@@ -224,6 +283,63 @@ async def _sleep_backoff(
         await asyncio.sleep(delay)
 
 
+# ==================================================
+# HTTP RESPONSE HELPERS
+# ==================================================
+
+def _response_error_message(
+    response: httpx.Response,
+    url: str,
+) -> str:
+    """
+    إظهار معلومات الخطأ دون تسجيل محتوى حساس.
+    """
+
+    status = response.status_code
+
+    try:
+        body = response.text[:500]
+
+    except Exception:
+        body = ""
+
+    body = body.replace("\n", " ").strip()
+
+    if body:
+        return f"HTTP {status} from {url}: {body}"
+
+    return f"HTTP {status} from {url}"
+
+
+def _decode_json_response(
+    response: httpx.Response,
+    url: str,
+) -> dict:
+
+    try:
+        payload = response.json()
+
+    except ValueError as exc:
+
+        raise HttpFailure(
+            f"Invalid JSON response from {url}",
+            status_code=502,
+        ) from exc
+
+    if not isinstance(payload, dict):
+
+        raise HttpFailure(
+            f"Unexpected JSON payload from {url}",
+            status_code=502,
+        )
+
+    return payload
+
+
+# ==================================================
+# HTTP GET JSON
+# ==================================================
+
 async def _http_get_json(
     client: httpx.AsyncClient,
     url: str,
@@ -232,11 +348,14 @@ async def _http_get_json(
 
     last_error = None
 
-    for attempt in range(HTTP_RETRY_ATTEMPTS + 1):
+    for attempt in range(
+        HTTP_RETRY_ATTEMPTS + 1
+    ):
 
         response = None
 
         try:
+
             response = await client.get(
                 url,
                 params=params,
@@ -245,7 +364,6 @@ async def _http_get_json(
 
             status = response.status_code
 
-            # Retry للحالات المؤقتة
             if status in RETRYABLE_STATUS_CODES:
 
                 retry_after = parse_retry_after(
@@ -265,48 +383,29 @@ async def _http_get_json(
                     continue
 
                 raise HttpFailure(
-                    f"HTTP {status} from {url}",
+                    _response_error_message(
+                        response,
+                        url,
+                    ),
                     status_code=status,
                     retryable=True,
                 )
 
-            # أخطاء HTTP غير القابلة للإعادة
             if status >= 400:
 
                 raise HttpFailure(
-                    f"HTTP {status} from {url}",
+                    _response_error_message(
+                        response,
+                        url,
+                    ),
                     status_code=status,
                     retryable=False,
                 )
 
-            # قراءة JSON
-            try:
-                payload = response.json()
-
-            except ValueError as exc:
-
-                last_error = exc
-
-                if attempt < HTTP_RETRY_ATTEMPTS:
-
-                    await response.aclose()
-                    response = None
-
-                    await _sleep_backoff(attempt)
-
-                    continue
-
-                raise HttpFailure(
-                    f"Invalid JSON from {url}",
-                    status_code=502,
-                ) from exc
-
-            if not isinstance(payload, dict):
-
-                raise HttpFailure(
-                    f"Unexpected JSON payload from {url}",
-                    status_code=502,
-                )
+            payload = _decode_json_response(
+                response,
+                url,
+            )
 
             return status, payload
 
@@ -344,20 +443,13 @@ async def _http_get_json(
         finally:
 
             if response is not None:
+
                 await response.aclose()
 
     raise HttpFailure(
         f"Request failed for {url}: {last_error}",
         status_code=502,
         retryable=True,
-    )
-
-
-def _http_exception(exc: HttpFailure) -> HTTPException:
-
-    return HTTPException(
-        status_code=exc.status_code or 502,
-        detail=str(exc),
     )
 
 
@@ -373,11 +465,14 @@ async def _http_post_json(
 
     last_error = None
 
-    for attempt in range(HTTP_RETRY_ATTEMPTS + 1):
+    for attempt in range(
+        HTTP_RETRY_ATTEMPTS + 1
+    ):
 
         response = None
 
         try:
+
             response = await client.post(
                 url,
                 json=json_body,
@@ -405,7 +500,10 @@ async def _http_post_json(
                     continue
 
                 raise HttpFailure(
-                    f"HTTP {status} from {url}",
+                    _response_error_message(
+                        response,
+                        url,
+                    ),
                     status_code=status,
                     retryable=True,
                 )
@@ -413,37 +511,18 @@ async def _http_post_json(
             if status >= 400:
 
                 raise HttpFailure(
-                    f"HTTP {status} from {url}",
+                    _response_error_message(
+                        response,
+                        url,
+                    ),
                     status_code=status,
+                    retryable=False,
                 )
 
-            try:
-                payload = response.json()
-
-            except ValueError as exc:
-
-                last_error = exc
-
-                if attempt < HTTP_RETRY_ATTEMPTS:
-
-                    await response.aclose()
-                    response = None
-
-                    await _sleep_backoff(attempt)
-
-                    continue
-
-                raise HttpFailure(
-                    f"Invalid JSON from {url}",
-                    status_code=502,
-                ) from exc
-
-            if not isinstance(payload, dict):
-
-                raise HttpFailure(
-                    f"Unexpected JSON payload from {url}",
-                    status_code=502,
-                )
+            payload = _decode_json_response(
+                response,
+                url,
+            )
 
             return status, payload
 
@@ -481,6 +560,7 @@ async def _http_post_json(
         finally:
 
             if response is not None:
+
                 await response.aclose()
 
     raise HttpFailure(
@@ -488,7 +568,9 @@ async def _http_post_json(
         status_code=502,
         retryable=True,
     )
-    # ==================================================
+
+
+# ==================================================
 # TTL CACHE
 # ==================================================
 
@@ -499,12 +581,17 @@ class _TTLCache:
         ttl: int,
         max_size: int = 200,
     ):
+
         self.ttl = ttl
         self.max_size = max_size
+
         self.data = OrderedDict()
         self.lock = asyncio.Lock()
 
-    async def get(self, key: str):
+    async def get(
+        self,
+        key: str,
+    ):
 
         now = time.monotonic()
 
@@ -518,7 +605,12 @@ class _TTLCache:
             expires_at, value = item
 
             if expires_at <= now:
-                self.data.pop(key, None)
+
+                self.data.pop(
+                    key,
+                    None,
+                )
+
                 return None
 
             self.data.move_to_end(key)
@@ -532,7 +624,11 @@ class _TTLCache:
         ttl: Optional[int] = None,
     ):
 
-        duration = self.ttl if ttl is None else ttl
+        duration = (
+            self.ttl
+            if ttl is None
+            else ttl
+        )
 
         async with self.lock:
 
@@ -544,12 +640,22 @@ class _TTLCache:
             self.data.move_to_end(key)
 
             while len(self.data) > self.max_size:
-                self.data.popitem(last=False)
 
-    async def delete(self, key: str):
+                self.data.popitem(
+                    last=False
+                )
+
+    async def delete(
+        self,
+        key: str,
+    ):
 
         async with self.lock:
-            self.data.pop(key, None)
+
+            self.data.pop(
+                key,
+                None,
+            )
 
     async def clear(self):
 
@@ -585,8 +691,7 @@ class _ProgressStore:
     """
     حفظ تقدم جلب الفصول في الذاكرة فقط.
 
-    ملاحظة:
-    البيانات تضيع عند إعادة تشغيل التطبيق أو Render.
+    البيانات تضيع عند إعادة تشغيل التطبيق.
     """
 
     def __init__(
@@ -594,8 +699,10 @@ class _ProgressStore:
         ttl: int = PROGRESS_TTL,
         max_size: int = PROGRESS_MAX_SIZE,
     ):
+
         self.ttl = ttl
         self.max_size = max_size
+
         self.data = OrderedDict()
         self.lock = asyncio.Lock()
 
@@ -610,7 +717,11 @@ class _ProgressStore:
         ]
 
         for key in expired:
-            self.data.pop(key, None)
+
+            self.data.pop(
+                key,
+                None,
+            )
 
     async def update(
         self,
@@ -622,20 +733,29 @@ class _ProgressStore:
 
             self._cleanup_locked()
 
-            current = self.data.get(key, {})
+            current = self.data.get(
+                key,
+                {},
+            )
 
             record = {
                 **current,
                 **values,
                 "updated_at": time.time(),
-                "expires_at": time.monotonic() + self.ttl,
+                "expires_at": (
+                    time.monotonic() + self.ttl
+                ),
             }
 
             self.data[key] = record
+
             self.data.move_to_end(key)
 
             while len(self.data) > self.max_size:
-                self.data.popitem(last=False)
+
+                self.data.popitem(
+                    last=False
+                )
 
             return dict(record)
 
@@ -657,14 +777,24 @@ class _ProgressStore:
 
             result = dict(item)
 
-            result.pop("expires_at", None)
+            result.pop(
+                "expires_at",
+                None,
+            )
 
             return result
 
-    async def delete(self, key: str):
+    async def delete(
+        self,
+        key: str,
+    ):
 
         async with self.lock:
-            self.data.pop(key, None)
+
+            self.data.pop(
+                key,
+                None,
+            )
 
 
 _progress_store = _ProgressStore()
@@ -685,11 +815,18 @@ def _safe_int(
     try:
         return int(value)
 
-    except (ValueError, TypeError, OverflowError):
+    except (
+        ValueError,
+        TypeError,
+        OverflowError,
+    ):
+
         return default
 
 
-def _clean_text(value: Any) -> str:
+def _clean_text(
+    value: Any,
+) -> str:
 
     if value is None:
         return ""
@@ -701,15 +838,39 @@ def _clean_text(value: Any) -> str:
         text,
     )
 
-    text = text.replace("\u200b", "")
-    text = text.replace("\ufeff", "")
+    text = text.replace(
+        "\u200b",
+        "",
+    )
 
-    text = re.sub(r"\s+", " ", text)
+    text = text.replace(
+        "\ufeff",
+        "",
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
     return text.strip()
 
 
-def _normalize_title(value: Any) -> str:
+# ==================================================
+# TITLE NORMALIZATION
+# ==================================================
+
+def _normalize_title(
+    value: Any,
+) -> str:
+    """
+    تطبيع العناوين مع الحفاظ على الحروف
+    العربية واليابانية والكورية والصينية وغيرها.
+
+    لا نحصر النص في a-z لأن ذلك كان يؤدي
+    إلى حذف كثير من عناوين المانهو والمانغا.
+    """
 
     text = _clean_text(value).casefold()
 
@@ -724,18 +885,38 @@ def _normalize_title(value: Any) -> str:
         if not unicodedata.combining(char)
     )
 
-    text = text.replace("&", " and ")
-
-    text = re.sub(
-        r"[^a-z0-9\u0600-\u06ff]+",
-        " ",
-        text,
+    text = text.replace(
+        "&",
+        " and ",
     )
 
-    return re.sub(r"\s+", " ", text).strip()
+    # الاحتفاظ بكل الحروف والأرقام في Unicode
+    characters = []
+
+    for char in text:
+
+        if char.isalnum():
+            characters.append(char)
+
+        elif char.isspace():
+            characters.append(" ")
+
+        else:
+            characters.append(" ")
+
+    text = "".join(characters)
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text,
+    ).strip()
 
 
-def normalize_title(value: Any) -> str:
+def normalize_title(
+    value: Any,
+) -> str:
+
     return _normalize_title(value)
 
 
@@ -769,9 +950,13 @@ def title_similarity(
     if not words_a or not words_b:
         return sequence_score
 
-    intersection = len(words_a & words_b)
+    intersection = len(
+        words_a & words_b
+    )
 
-    union = len(words_a | words_b)
+    union = len(
+        words_a | words_b
+    )
 
     jaccard_score = (
         intersection / union
@@ -780,7 +965,8 @@ def title_similarity(
     )
 
     containment_score = (
-        intersection / min(
+        intersection
+        / min(
             len(words_a),
             len(words_b),
         )
@@ -847,7 +1033,6 @@ def extract_titles(
                 if title:
                     titles.append(title)
 
-    # إزالة التكرار مع الحفاظ على الترتيب
     result = []
     seen = set()
 
@@ -906,6 +1091,9 @@ def _mangadex_title(
         "attributes",
         {},
     )
+
+    if not isinstance(attributes, dict):
+        attributes = {}
 
     primary = attributes.get(
         "title",
@@ -1010,6 +1198,7 @@ def _mangadex_cover(
         )
 
         if filename:
+
             return (
                 "https://uploads.mangadex.org/"
                 f"covers/{manga.get('id')}/{filename}"
@@ -1124,8 +1313,27 @@ async def _anilist_post(
     errors = payload.get("errors")
 
     if errors:
+
+        messages = []
+
+        for error in errors:
+
+            if isinstance(error, dict):
+
+                message = error.get("message")
+
+                if message:
+                    messages.append(
+                        str(message)
+                    )
+
+        detail = "; ".join(messages)
+
         raise HttpFailure(
-            "AniList GraphQL returned errors",
+            (
+                "AniList GraphQL returned errors"
+                + (f": {detail}" if detail else "")
+            ),
             status_code=502,
         )
 
@@ -1136,9 +1344,13 @@ async def _anilist_post(
 # LANGUAGE HELPERS
 # ==================================================
 
-def _language_name(code: str) -> str:
+def _language_name(
+    code: str,
+) -> str:
 
-    code = str(code or "").lower().strip()
+    code = str(
+        code or ""
+    ).lower().strip()
 
     return LANGUAGES.get(
         code,
@@ -1195,7 +1407,10 @@ def _extract_feed_data(
     payload: dict,
 ) -> list[dict]:
 
-    data = payload.get("data", [])
+    data = payload.get(
+        "data",
+        [],
+    )
 
     if not isinstance(data, list):
         return []
@@ -1222,193 +1437,7 @@ def _chapter_language(
 
     attributes = chapter.get(
         "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        return None
-
-    return _valid_language_code(
-        attributes.get("translatedLanguage")
-    )
-
-
-def _chapter_number(
-    chapter: dict,
-) -> Optional[float]:
-
-    attributes = chapter.get(
-        "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        return None
-
-    value = attributes.get("chapter")
-
-    if value is None:
-        return None
-
-    try:
-        number = float(str(value).strip())
-
-        if math.isfinite(number):
-            return number
-
-    except (ValueError, TypeError, OverflowError):
-        pass
-
-    return None
-
-
-def _chapter_volume(
-    chapter: dict,
-) -> Optional[str]:
-
-    attributes = chapter.get(
-        "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        return None
-
-    value = attributes.get("volume")
-
-    if value is None:
-        return None
-
-    return str(value).strip() or None
-
-
-def _chapter_title(
-    chapter: dict,
-) -> str:
-
-    attributes = chapter.get(
-        "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        return ""
-
-    return _clean_text(
-        attributes.get("title")
-    )
-
-
-def _chapter_pages(
-    chapter: dict,
-) -> Optional[int]:
-
-    attributes = chapter.get(
-        "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        return None
-
-    return _safe_int(
-        attributes.get("pages")
-    )
-
-
-def _chapter_published_at(
-    chapter: dict,
-) -> Optional[str]:
-
-    attributes = chapter.get(
-        "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        return None
-
-    return (
-        attributes.get("publishAt")
-        or attributes.get("createdAt")
-    )
-
-
-def _chapter_external_url(
-    chapter: dict,
-) -> Optional[str]:
-
-    attributes = chapter.get(
-        "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        return None
-
-    return attributes.get("externalUrl")
-
-
-# ==================================================
-# CHAPTER IDENTIFICATION
-# ==================================================
-
-def _chapter_identity(
-    chapter: dict,
-) -> str:
-
-    chapter_id = chapter.get("id")
-
-    if chapter_id:
-        return f"id:{chapter_id}"
-
-    attributes = chapter.get(
-        "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        attributes = {}
-
-    number = attributes.get("chapter")
-    volume = attributes.get("volume")
-    title = _clean_text(
-        attributes.get("title")
-    )
-
-    language = attributes.get(
-        "translatedLanguage"
-    )
-
-    groups = []
-
-    relationships = chapter.get(
-        "relationships",
-        [],
-    )
-
-    if isinstance(relationships, list):
-
-        for relation in relationships:
-
-            if (
-                isinstance(relation, dict)
-                and relation.get("type") == "scanlation_group"
-            ):
-                groups.append(
-                    relation.get("id", "")
-                )
-
-    # المفتاح البديل لا يدمج الفصول
-    # التي لها نفس الرقم لكن معرفات مختلفة.
-    return "|".join([
-        str(number or ""),
-        str(volume or ""),
-        title,
-        str(language or ""),
-        ",".join(sorted(groups)),
-    ])
-    # ==================================================
+        # ==================================================
 # FETCH AVAILABLE LANGUAGES
 # ==================================================
 
@@ -1416,10 +1445,6 @@ async def fetch_available_languages(
     manga_id: str,
     client: Optional[httpx.AsyncClient] = None,
 ) -> list[str]:
-    """
-    اكتشاف اللغات الموجودة فعلياً في فصول العمل.
-    لا يعتمد على /manga/tag لأنه لا يمثل دليل اللغات.
-    """
 
     manga_id = str(manga_id).strip()
 
@@ -1436,11 +1461,17 @@ async def fetch_available_languages(
         languages = set()
         offset = 0
         visited_offsets = set()
+        total = None
+        completed = False
 
-        for _ in range(MAX_FEED_PAGES):
+        for page_index in range(MAX_FEED_PAGES):
 
             if offset in visited_offsets:
-                break
+
+                raise HttpFailure(
+                    "MangaDex language pagination loop detected",
+                    status_code=502,
+                )
 
             visited_offsets.add(offset)
 
@@ -1449,7 +1480,6 @@ async def fetch_available_languages(
                 "limit": FEED_PAGE_SIZE,
                 "offset": offset,
                 "order[chapter]": "asc",
-                "includes[]": ["scanlation_group"],
             }
 
             payload = await _mangadex_get(
@@ -1460,6 +1490,11 @@ async def fetch_available_languages(
 
             chapters = _extract_feed_data(payload)
 
+            page_total = _extract_feed_total(payload)
+
+            if page_total is not None:
+                total = page_total
+
             for chapter in chapters:
 
                 language = _chapter_language(chapter)
@@ -1467,24 +1502,52 @@ async def fetch_available_languages(
                 if language:
                     languages.add(language)
 
-            total = _extract_feed_total(payload)
-
             if not chapters:
+
+                if total is not None and offset < total:
+
+                    raise HttpFailure(
+                        "Incomplete MangaDex language pagination",
+                        status_code=502,
+                    )
+
+                completed = True
                 break
 
             offset += len(chapters)
 
             if total is not None and offset >= total:
+
+                completed = True
                 break
 
             if len(chapters) < FEED_PAGE_SIZE:
+
+                if total is not None and offset < total:
+
+                    raise HttpFailure(
+                        "MangaDex returned an incomplete language page",
+                        status_code=502,
+                    )
+
+                completed = True
                 break
+
+        if not completed:
+
+            raise HttpFailure(
+                "Maximum language pagination limit reached",
+                status_code=502,
+            )
 
         return sorted(languages)
 
     if client is not None:
+
         result = await _fetch(client)
+
     else:
+
         async with _client_context() as active_client:
             result = await _fetch(active_client)
 
@@ -1517,7 +1580,10 @@ def _chapter_sort_key(
 
     number = _chapter_number(chapter)
 
-    volume = _safe_int(raw_volume, -1)
+    volume = _safe_int(
+        raw_volume,
+        -1,
+    )
 
     if volume is None:
         volume = -1
@@ -1532,7 +1598,6 @@ def _chapter_sort_key(
             str(chapter.get("id", "")),
         )
 
-    # الفصول الخاصة أو التي لا تحمل رقماً
     title = _chapter_title(chapter).casefold()
 
     return (
@@ -1544,7 +1609,10 @@ def _chapter_sort_key(
     )
 
 
-def chapter_sort_key(chapter: dict) -> tuple:
+def chapter_sort_key(
+    chapter: dict,
+) -> tuple:
+
     return _chapter_sort_key(chapter)
 
 
@@ -1561,37 +1629,13 @@ def _chapter_type(
     if number is not None:
         return "numbered"
 
-    title = _chapter_title(chapter).casefold()
-
-    if not title:
-        return "special"
-
-    special_words = (
-        "extra",
-        "special",
-        "side story",
-        "oneshot",
-        "one-shot",
-        "omake",
-        "bonus",
-        "epilogue",
-        "prologue",
-        "afterword",
-        "extras",
-        "فصل خاص",
-        "إضافي",
-        "ملحق",
-        "خاتمة",
-        "مقدمة",
-    )
-
-    if any(word in title for word in special_words):
-        return "special"
-
     return "special"
 
 
-def classify_chapter(chapter: dict) -> str:
+def classify_chapter(
+    chapter: dict,
+) -> str:
+
     return _chapter_type(chapter)
 
 
@@ -1675,7 +1719,6 @@ def _deduplicate_chapters(
             continue
 
         seen.add(identity)
-
         result.append(chapter)
 
     return result
@@ -1691,16 +1734,11 @@ async def fetch_all_chapters(
     client: Optional[httpx.AsyncClient] = None,
     progress_key: Optional[str] = None,
 ) -> list[dict]:
-    """
-    جلب جميع صفحات الفصول تلقائياً.
-
-    إذا فشلت صفحة في منتصف العملية، نرفع الخطأ
-    ولا نرجع قائمة جزئية على أنها مكتملة.
-    """
 
     manga_id = str(manga_id).strip()
 
     if not manga_id:
+
         raise HttpFailure(
             "Missing MangaDex manga ID",
             status_code=400,
@@ -1719,7 +1757,24 @@ async def fetch_all_chapters(
     cached = await _feed_cache.get(cache_key)
 
     if cached is not None:
-        return [dict(item) for item in cached]
+
+        if progress_key:
+
+            await _progress_store.update(
+                progress_key,
+                manga_id=manga_id,
+                language=language,
+                status="completed",
+                chapters_fetched=len(cached),
+                total=len(cached),
+                page=0,
+                cached=True,
+            )
+
+        return [
+            dict(item)
+            for item in cached
+        ]
 
     async def _fetch(active_client):
 
@@ -1729,6 +1784,8 @@ async def fetch_all_chapters(
         visited_offsets = set()
 
         total = None
+        completed = False
+        page_index = 0
 
         for page_index in range(MAX_FEED_PAGES):
 
@@ -1779,6 +1836,15 @@ async def fetch_all_chapters(
                 total = page_total
 
             if not page_chapters:
+
+                if total is not None and offset < total:
+
+                    raise HttpFailure(
+                        "Incomplete MangaDex feed: empty page before total",
+                        status_code=502,
+                    )
+
+                completed = True
                 break
 
             all_chapters.extend(page_chapters)
@@ -1794,21 +1860,46 @@ async def fetch_all_chapters(
                     status_code=502,
                 )
 
+            if progress_key:
+
+                await _progress_store.update(
+                    progress_key,
+                    manga_id=manga_id,
+                    language=language,
+                    status="running",
+                    page=page_index + 1,
+                    offset=offset,
+                    chapters_fetched=len(all_chapters),
+                    total=total,
+                )
+
             if total is not None and offset >= total:
+
+                completed = True
                 break
 
             if len(page_chapters) < FEED_PAGE_SIZE:
+
+                if total is not None and offset < total:
+
+                    raise HttpFailure(
+                        (
+                            "Incomplete MangaDex feed: "
+                            f"received {offset} of {total}"
+                        ),
+                        status_code=502,
+                    )
+
+                completed = True
                 break
 
-        else:
+        if not completed:
 
             raise HttpFailure(
                 "Maximum MangaDex pagination limit reached",
                 status_code=502,
             )
 
-        # إذا أعاد المصدر total أكبر من عدد النتائج،
-        # لا نعتبر القائمة مكتملة.
         if total is not None and len(all_chapters) < total:
 
             raise HttpFailure(
@@ -1838,6 +1929,7 @@ async def fetch_all_chapters(
                 offset=offset,
                 chapters_fetched=len(all_chapters),
                 total=total,
+                cached=False,
             )
 
         return all_chapters
@@ -1845,9 +1937,11 @@ async def fetch_all_chapters(
     try:
 
         if client is not None:
+
             result = await _fetch(client)
 
         else:
+
             async with _client_context() as active_client:
                 result = await _fetch(active_client)
 
@@ -1874,18 +1968,24 @@ async def fetch_all_chapters(
                 error=str(exc),
             )
 
+        logger.exception(
+            "Unexpected chapter fetching error"
+        )
+
         raise HttpFailure(
             f"Failed to fetch chapters: {exc}",
             status_code=502,
         ) from exc
 
-    # لا نحفظ إلا النتائج التي اكتمل جلبها
     await _feed_cache.set(
         cache_key,
         result,
     )
 
-    return [dict(item) for item in result]
+    return [
+        dict(item)
+        for item in result
+    ]
 
 
 # ==================================================
@@ -1933,12 +2033,6 @@ def group_chapters_by_language(
 def _chapter_alternatives(
     chapters: Iterable[dict],
 ) -> dict[str, list[dict]]:
-    """
-    تجميع نسخ الفصل نفسه حسب الرقم واللغة.
-
-    لا نحذف الفصول ذات المعرفات المختلفة.
-    هذه الدالة تُستخدم للعرض فقط.
-    """
 
     alternatives = {}
 
@@ -1953,7 +2047,6 @@ def _chapter_alternatives(
             attributes = {}
 
         number = attributes.get("chapter")
-
         volume = attributes.get("volume")
 
         title = _chapter_title(chapter)
@@ -1979,7 +2072,9 @@ def _chapter_alternatives(
                 f"unique:{chapter.get('id')}"
             )
 
-        key = f"{language or 'unknown'}:{identity}"
+        key = (
+            f"{language or 'unknown'}:{identity}"
+        )
 
         alternatives.setdefault(
             key,
@@ -2056,22 +2151,11 @@ def _build_chapter_response(
         code = chapter.get("language")
 
         if code:
-            grouped.setdefault(code, []).append(chapter)
 
-    for code in grouped:
-
-        grouped[code].sort(
-            key=lambda item: (
-                _safe_int(item.get("volume"), -1) or -1,
-                (
-                    float(item["chapter"])
-                    if item.get("chapter") is not None
-                    and str(item["chapter"]).replace(".", "", 1).isdigit()
-                    else float("inf")
-                ),
-                str(item.get("title") or "").casefold(),
-            )
-        )
+            grouped.setdefault(
+                code,
+                [],
+            ).append(chapter)
 
     return {
         "manga_id": manga_id,
@@ -2082,7 +2166,9 @@ def _build_chapter_response(
         "chapters_by_language": grouped,
         "counts": _chapter_counts(chapters),
     }
-    # ==================================================
+
+
+# ==================================================
 # ANILIST
 # ==================================================
 
@@ -2125,12 +2211,19 @@ async def fetch_anilist(
     if not title:
         return None
 
-    cache_key = f"anilist:{_normalize_title(title)}"
+    cache_key = (
+        f"anilist:{_normalize_title(title)}"
+    )
 
     cached = await _resolve_cache.get(cache_key)
 
     if cached is not None:
-        return dict(cached) if cached else None
+
+        return (
+            dict(cached)
+            if cached
+            else None
+        )
 
     async def _fetch(active_client):
 
@@ -2162,7 +2255,10 @@ async def fetch_anilist(
         if isinstance(synonyms, list):
             all_titles.extend(synonyms)
 
-        score = title_similarity(
+        # التصحيح المهم:
+        # title_similarity تستقبل عنوانين مفردين.
+        # المقارنة بين القوائم تتم عبر _best_title_similarity.
+        score = _best_title_similarity(
             [title],
             [
                 item
@@ -2171,16 +2267,17 @@ async def fetch_anilist(
             ],
         )
 
-        # لا نقبل نتيجة بعيدة عن البحث
         if score < TITLE_MATCH_THRESHOLD:
             return None
 
         return media
 
     if client is not None:
+
         result = await _fetch(client)
 
     else:
+
         async with _client_context() as active_client:
             result = await _fetch(active_client)
 
@@ -2207,7 +2304,10 @@ async def search_mangadex(
     if not title:
         return []
 
-    limit = max(1, min(int(limit), 100))
+    limit = max(
+        1,
+        min(int(limit), 100),
+    )
 
     cache_key = (
         f"search:{_normalize_title(title)}:{limit}"
@@ -2216,12 +2316,20 @@ async def search_mangadex(
     cached = await _resolve_cache.get(cache_key)
 
     if cached is not None:
-        return [dict(item) for item in cached]
+
+        return [
+            dict(item)
+            for item in cached
+        ]
 
     params = {
         "title": title,
         "limit": limit,
-        "includes[]": ["cover_art", "author", "artist"],
+        "includes[]": [
+            "cover_art",
+            "author",
+            "artist",
+        ],
         "order[relevance]": "desc",
     }
 
@@ -2236,9 +2344,11 @@ async def search_mangadex(
         return _extract_feed_data(payload)
 
     if client is not None:
+
         result = await _fetch(client)
 
     else:
+
         async with _client_context() as active_client:
             result = await _fetch(active_client)
 
@@ -2247,7 +2357,10 @@ async def search_mangadex(
         result,
     )
 
-    return [dict(item) for item in result]
+    return [
+        dict(item)
+        for item in result
+    ]
 
 
 # ==================================================
@@ -2258,12 +2371,6 @@ def match_mangadex(
     anilist: dict,
     candidates: list[dict],
 ) -> Optional[dict]:
-    """
-    اختيار عمل MangaDex بناءً على العناوين.
-
-    لا نعتمد على تخمين MAL ID داخل relationships.
-    إذا كانت النتائج متقاربة جداً نرفض الاختيار.
-    """
 
     if not isinstance(anilist, dict):
         return None
@@ -2322,24 +2429,32 @@ def match_mangadex(
         if not isinstance(attributes, dict):
             attributes = {}
 
-        original_language = (
-            attributes.get("originalLanguage")
+        original_language = attributes.get(
+            "originalLanguage"
         )
 
         country = anilist.get(
             "countryOfOrigin"
         )
 
-        # إشارة مساعدة فقط، ليست دليلاً قاطعاً
         language_bonus = 0.0
 
-        if country == "JP" and original_language == "ja":
+        if (
+            country == "JP"
+            and original_language == "ja"
+        ):
             language_bonus = 0.01
 
-        elif country == "KR" and original_language == "ko":
+        elif (
+            country == "KR"
+            and original_language == "ko"
+        ):
             language_bonus = 0.01
 
-        elif country == "CN" and original_language == "zh":
+        elif (
+            country == "CN"
+            and original_language == "zh"
+        ):
             language_bonus = 0.01
 
         final_score = min(
@@ -2386,16 +2501,11 @@ async def resolve_manga(
     manga_id: str,
     client: Optional[httpx.AsyncClient] = None,
 ) -> dict:
-    """
-    استقبال AniList ID أو MangaDex ID.
-
-    إذا كان UUID نحاول جلب MangaDex مباشرة.
-    إذا كان رقماً نعتبره AniList ID ونبحث عن العمل.
-    """
 
     manga_id = str(manga_id).strip()
 
     if not manga_id:
+
         raise HTTPException(
             status_code=400,
             detail="Missing manga ID",
@@ -2435,6 +2545,7 @@ async def resolve_manga(
             manga = payload.get("data")
 
             if not isinstance(manga, dict):
+
                 raise HTTPException(
                     status_code=404,
                     detail="MangaDex manga not found",
@@ -2567,13 +2678,16 @@ async def resolve_manga(
     try:
 
         if client is not None:
+
             result = await _fetch(client)
 
         else:
+
             async with _client_context() as active_client:
                 result = await _fetch(active_client)
 
     except HttpFailure as exc:
+
         raise _http_exception(exc) from exc
 
     await _resolve_cache.set(
@@ -2612,6 +2726,7 @@ async def fetch_language(
         )
 
     except HttpFailure as exc:
+
         raise _http_exception(exc) from exc
 
 
@@ -2628,6 +2743,23 @@ async def get_chapters(
     ),
 ):
 
+    normalized_language = (
+        _valid_language_code(language)
+        if language
+        else None
+    )
+
+    if language and not normalized_language:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid language code",
+        )
+
+    progress_key = (
+        f"{manga_id}:{normalized_language or 'all'}"
+    )
+
     try:
 
         resolved = await resolve_manga(manga_id)
@@ -2643,13 +2775,14 @@ async def get_chapters(
 
         chapters = await fetch_all_chapters(
             actual_id,
-            language=language,
+            language=normalized_language,
+            progress_key=progress_key,
         )
 
         response = _build_chapter_response(
             actual_id,
             chapters,
-            language,
+            normalized_language,
         )
 
         response["manga"] = {
@@ -2666,6 +2799,7 @@ async def get_chapters(
         raise
 
     except HttpFailure as exc:
+
         raise _http_exception(exc) from exc
 
 
@@ -2678,6 +2812,23 @@ async def get_chapter_list(
     manga_id: str,
     language: Optional[str] = None,
 ):
+
+    normalized_language = (
+        _valid_language_code(language)
+        if language
+        else None
+    )
+
+    if language and not normalized_language:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid language code",
+        )
+
+    progress_key = (
+        f"{manga_id}:{normalized_language or 'all'}"
+    )
 
     try:
 
@@ -2694,7 +2845,8 @@ async def get_chapter_list(
 
         chapters = await fetch_all_chapters(
             actual_id,
-            language=language,
+            language=normalized_language,
+            progress_key=progress_key,
         )
 
         serialized = [
@@ -2713,6 +2865,7 @@ async def get_chapter_list(
         raise
 
     except HttpFailure as exc:
+
         raise _http_exception(exc) from exc
 
 
@@ -2758,7 +2911,7 @@ async def get_chapter_list_progress(
 
 
 # ==================================================
-# ALTERNATIVE LEGACY ROUTE
+# CHAPTER LIST LANGUAGES
 # ==================================================
 
 @router.get("/manga/{manga_id}/chapter-list/languages")
@@ -2799,6 +2952,7 @@ async def get_chapter_list_languages(
         raise
 
     except HttpFailure as exc:
+
         raise _http_exception(exc) from exc
 
 
@@ -2818,8 +2972,11 @@ def get_semaphore(
     global _semaphore_loop
 
     try:
+
         loop = asyncio.get_running_loop()
+
     except RuntimeError:
+
         loop = None
 
     if loop is None:

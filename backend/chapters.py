@@ -5,7 +5,6 @@ import uuid
 from difflib import SequenceMatcher
 
 import httpx
-
 from fastapi import APIRouter, HTTPException, Query
 
 
@@ -73,12 +72,10 @@ def title_similarity(first, second):
 
 def extract_titles(media):
     titles = media.get("title") or {}
-
     result = []
 
     for key in ("english", "romaji", "native"):
         value = titles.get(key)
-
         if value:
             result.append(value)
 
@@ -133,7 +130,6 @@ async def fetch_anilist(manga_id):
             )
 
             response.raise_for_status()
-
             data = response.json()
 
             if data.get("errors"):
@@ -173,7 +169,6 @@ async def search_mangadex(title):
             )
 
             response.raise_for_status()
-
             return response.json().get("data", [])
 
     except httpx.HTTPError:
@@ -202,7 +197,6 @@ def match_mangadex(anilist_media, candidates):
 
     for candidate in candidates:
         candidate_titles = get_mangadex_titles(candidate)
-
         score = 0
 
         for first in anilist_titles:
@@ -260,15 +254,20 @@ async def resolve_manga(identifier):
         )
 
     titles = extract_titles(anilist)
-
     candidates = []
 
     for title in titles:
         results = await search_mangadex(title)
         candidates.extend(results)
 
-        if candidates:
-            break
+    # Remove duplicate MangaDex results
+    unique_candidates = {}
+    for candidate in candidates:
+        candidate_id = candidate.get("id")
+        if candidate_id:
+            unique_candidates[candidate_id] = candidate
+
+    candidates = list(unique_candidates.values())
 
     if not candidates:
         raise HTTPException(
@@ -495,16 +494,16 @@ async def get_chapter_list(
             )
 
             response.raise_for_status()
-
             data = response.json()
 
         chapters = []
 
         for item in data.get("data", []):
-                        attr = item.get("attributes", {})
+            attr = item.get("attributes", {})
             chapter_id = item.get("id")
 
             group = None
+
             for relation in item.get("relationships", []):
                 if relation.get("type") == "scanlation_group":
                     group = relation.get("attributes", {}).get("name")

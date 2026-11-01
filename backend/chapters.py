@@ -890,7 +890,6 @@ def _normalize_title(
         " and ",
     )
 
-    # الاحتفاظ بكل الحروف والأرقام في Unicode
     characters = []
 
     for char in text:
@@ -1431,13 +1430,208 @@ def _extract_feed_total(
     return _safe_int(total)
 
 
+# ==================================================
+# CHAPTER ATTRIBUTE HELPERS  (FIXED — كانت مفقودة)
+# ==================================================
+
+def _chapter_attributes(
+    chapter: dict,
+) -> dict:
+
+    if not isinstance(chapter, dict):
+        return {}
+
+    attributes = chapter.get("attributes", {})
+
+    if not isinstance(attributes, dict):
+        return {}
+
+    return attributes
+
+
 def _chapter_language(
     chapter: dict,
 ) -> Optional[str]:
+    """
+    إرجاع رمز اللغة المترجمة للفصل بصيغة موحَّدة.
+    """
 
-    attributes = chapter.get(
-        "attributes",
-        # ==================================================
+    attributes = _chapter_attributes(chapter)
+
+    language = attributes.get("translatedLanguage")
+
+    if not language:
+        return None
+
+    language = str(language).strip().lower()
+
+    if not language:
+        return None
+
+    return language
+
+
+def _chapter_number(
+    chapter: dict,
+) -> Optional[float]:
+    """
+    إرجاع رقم الفصل كـ float إن كان رقمياً،
+    أو None للفصول الخاصة (Extras/Omake...).
+    """
+
+    attributes = _chapter_attributes(chapter)
+
+    raw = attributes.get("chapter")
+
+    if raw is None:
+        return None
+
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+
+    try:
+        number = float(raw)
+
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+    if not math.isfinite(number):
+        return None
+
+    return number
+
+
+def _chapter_title(
+    chapter: dict,
+) -> str:
+
+    attributes = _chapter_attributes(chapter)
+
+    return _clean_text(attributes.get("title"))
+
+
+def _chapter_pages(
+    chapter: dict,
+) -> Optional[int]:
+
+    attributes = _chapter_attributes(chapter)
+
+    return _safe_int(attributes.get("pages"))
+
+
+def _chapter_external_url(
+    chapter: dict,
+) -> Optional[str]:
+
+    attributes = _chapter_attributes(chapter)
+
+    url = attributes.get("externalUrl")
+
+    if not url:
+        return None
+
+    url = str(url).strip()
+
+    return url or None
+
+
+def _chapter_published_at(
+    chapter: dict,
+) -> Optional[str]:
+
+    attributes = _chapter_attributes(chapter)
+
+    value = attributes.get("publishAt")
+
+    if not value:
+        return None
+
+    value = str(value).strip()
+
+    return value or None
+
+
+def _chapter_scanlation_group_ids(
+    chapter: dict,
+) -> tuple[str, ...]:
+    """
+    استخراج معرّفات مجموعات الترجمة المرتبطة بالفصل.
+    تُستخدم للتمييز بين نسخ متعددة من نفس الفصل.
+    """
+
+    relationships = chapter.get("relationships", [])
+
+    if not isinstance(relationships, list):
+        return ()
+
+    groups = []
+
+    for relation in relationships:
+
+        if not isinstance(relation, dict):
+            continue
+
+        if relation.get("type") != "scanlation_group":
+            continue
+
+        group_id = relation.get("id")
+
+        if group_id:
+            groups.append(str(group_id))
+
+    return tuple(sorted(groups))
+
+
+def _chapter_identity(
+    chapter: dict,
+) -> tuple:
+    """
+    هوية موحَّدة للفصل تُستخدم في إزالة التكرار.
+
+    الفصل يُعتبر مكرراً إذا تطابقت:
+    - رقمه (أو عنوانه للفصول الخاصة)
+    - لغته المترجمة
+    - مجموعات الترجمة المرتبطة به
+    """
+
+    attributes = _chapter_attributes(chapter)
+
+    raw_volume = attributes.get("volume")
+    volume_key = str(raw_volume) if raw_volume not in (None, "") else ""
+
+    language = _chapter_language(chapter) or ""
+
+    groups_key = ",".join(_chapter_scanlation_group_ids(chapter))
+
+    number = _chapter_number(chapter)
+
+    if number is not None:
+        return (
+            "number",
+            volume_key,
+            f"{number:g}",
+            language,
+            groups_key,
+        )
+
+    title = _chapter_title(chapter)
+
+    if title:
+        return (
+            "special",
+            volume_key,
+            _normalize_title(title),
+            language,
+            groups_key,
+        )
+
+    return (
+        "unique",
+        str(chapter.get("id", "")),
+    )
+    # ==================================================
 # FETCH AVAILABLE LANGUAGES
 # ==================================================
 
@@ -1464,7 +1658,7 @@ async def fetch_available_languages(
         total = None
         completed = False
 
-        for page_index in range(MAX_FEED_PAGES):
+        for _page_index in range(MAX_FEED_PAGES):
 
             if offset in visited_offsets:
 
@@ -1567,23 +1761,14 @@ def _chapter_sort_key(
     chapter: dict,
 ) -> tuple:
 
-    attributes = chapter.get(
-        "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        attributes = {}
+    attributes = _chapter_attributes(chapter)
 
     raw_number = attributes.get("chapter")
     raw_volume = attributes.get("volume")
 
     number = _chapter_number(chapter)
 
-    volume = _safe_int(
-        raw_volume,
-        -1,
-    )
+    volume = _safe_int(raw_volume, -1)
 
     if volume is None:
         volume = -1
@@ -1647,13 +1832,7 @@ def _serialize_chapter(
     chapter: dict,
 ) -> dict:
 
-    attributes = chapter.get(
-        "attributes",
-        {},
-    )
-
-    if not isinstance(attributes, dict):
-        attributes = {}
+    attributes = _chapter_attributes(chapter)
 
     chapter_id = chapter.get("id")
 
@@ -2038,13 +2217,7 @@ def _chapter_alternatives(
 
     for chapter in chapters:
 
-        attributes = chapter.get(
-            "attributes",
-            {},
-        )
-
-        if not isinstance(attributes, dict):
-            attributes = {}
+        attributes = _chapter_attributes(chapter)
 
         number = attributes.get("chapter")
         volume = attributes.get("volume")
@@ -2255,9 +2428,8 @@ async def fetch_anilist(
         if isinstance(synonyms, list):
             all_titles.extend(synonyms)
 
-        # التصحيح المهم:
-        # title_similarity تستقبل عنوانين مفردين.
-        # المقارنة بين القوائم تتم عبر _best_title_similarity.
+        # title_similarity تستقبل عنوانين مفردين،
+        # والمقارنة بين القوائم تتم عبر _best_title_similarity.
         score = _best_title_similarity(
             [title],
             [
@@ -2520,7 +2692,6 @@ async def resolve_manga(
 
     async def _fetch(active_client):
 
-        # UUID: MangaDex ID
         if re.fullmatch(
             r"[0-9a-fA-F]{8}-"
             r"[0-9a-fA-F]{4}-"
@@ -2565,7 +2736,6 @@ async def resolve_manga(
                 "anilist": None,
             }
 
-        # رقم: AniList ID
         if not manga_id.isdigit():
 
             raise HTTPException(

@@ -1,14 +1,15 @@
 """
 Manga AI Translator — Chapters module
-Corrected version 5.1
+Corrected version 5.2 — MangaDex-Only Resolver
 
 - يحافظ على router والمسارات القديمة.
-- MangaDex هو مصدر الفصول.
-- AniList للمعلومات ومطابقة هوية العمل.
-- خطة بديلة تلقائية: إذا فشل AniList → البحث في MangaDex.
+- MangaDex هو المصدر الوحيد للمعرّف والفصول.
+- البحث بالاسم مباشرة في MangaDex (بدون AniList).
+- استخراج UUID تلقائياً من أفضل تطابق.
+- جلب الفصول العربية افتراضياً إذا لم تُحدد لغة.
+- خطأ 404 واضح عند غياب الفصول أو فشل المصدر.
 - Pagination مع كشف الدوران والنتائج الناقصة.
 - Cache وProgress في الذاكرة فقط.
-- لا يحتاج مكتبات إضافية أو قاعدة بيانات.
 """
 
 from __future__ import annotations
@@ -44,10 +45,12 @@ router = APIRouter(prefix="/api/v1", tags=["Chapters"])
 # ==================================================
 
 MANGADEX_URL = "https://api.mangadex.org"
+
+# AniList اختياري — غير مستخدم في resolve_manga
 ANILIST_URL = "https://graphql.anilist.co"
 
 HEADERS = {
-    "User-Agent": "MangaAITranslator/5.1",
+    "User-Agent": "MangaAITranslator/5.2",
     "Accept": "application/json",
 }
 
@@ -100,11 +103,15 @@ RESOLVE_CACHE_MAX_SIZE = 500
 PROGRESS_TTL = 600
 PROGRESS_MAX_SIZE = 200
 
+# حد أدنى لقبول تطابق البحث بالعنوان
 TITLE_MATCH_THRESHOLD = 0.90
 TITLE_MATCH_MIN_MARGIN = 0.06
 
-# حد أدنى أخف للخطة البديلة عبر MangaDex
-MANGADEX_FALLBACK_MIN_SCORE = 0.50
+# حد أخف للبحث المباشر بالاسم في MangaDex
+MANGADEX_TITLE_MIN_SCORE = 0.50
+
+# اللغة الافتراضية عند عدم تحديدها
+DEFAULT_LANGUAGE = "ar"
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +193,7 @@ async def _client_context():
 
 class HttpFailure(Exception):
     """
-    خطأ موحد لطلبات MangaDex وAniList.
+    خطأ موحد لطلبات MangaDex (وAniList اختياريًا).
     """
 
     def __init__(
@@ -458,7 +465,7 @@ async def _http_get_json(
 
 
 # ==================================================
-# HTTP POST JSON
+# HTTP POST JSON (اختياري — لاستخدام AniList لاحقًا)
 # ==================================================
 
 async def _http_post_json(
@@ -694,7 +701,6 @@ _resolve_cache = _TTLCache(
 class _ProgressStore:
     """
     حفظ تقدم جلب الفصول في الذاكرة فقط.
-
     البيانات تضيع عند إعادة تشغيل التطبيق.
     """
 
@@ -1293,53 +1299,6 @@ async def _mangadex_get(
     return payload
 
 
-async def _anilist_post(
-    client: httpx.AsyncClient,
-    query: str,
-    variables: Optional[dict] = None,
-) -> dict:
-
-    body = {
-        "query": query,
-        "variables": variables or {},
-    }
-
-    _, payload = await _http_post_json(
-        client,
-        ANILIST_URL,
-        body,
-    )
-
-    errors = payload.get("errors")
-
-    if errors:
-
-        messages = []
-
-        for error in errors:
-
-            if isinstance(error, dict):
-
-                message = error.get("message")
-
-                if message:
-                    messages.append(
-                        str(message)
-                    )
-
-        detail = "; ".join(messages)
-
-        raise HttpFailure(
-            (
-                "AniList GraphQL returned errors"
-                + (f": {detail}" if detail else "")
-            ),
-            status_code=502,
-        )
-
-    return payload.get("data", {})
-
-
 # ==================================================
 # LANGUAGE HELPERS
 # ==================================================
@@ -1432,7 +1391,7 @@ def _extract_feed_total(
 
 
 # ==================================================
-# CHAPTER ATTRIBUTE HELPERS (المصحَّحة)
+# CHAPTER ATTRIBUTE HELPERS
 # ==================================================
 
 def _chapter_attributes(
@@ -1590,11 +1549,6 @@ def _chapter_identity(
 ) -> tuple:
     """
     هوية موحَّدة للفصل تُستخدم في إزالة التكرار.
-
-    الفصل يُعتبر مكرراً إذا تطابقت:
-    - رقمه (أو عنوانه للفصول الخاصة)
-    - لغته المترجمة
-    - مجموعات الترجمة المرتبطة به
     """
 
     attributes = _chapter_attributes(chapter)
@@ -1635,81 +1589,129 @@ def _chapter_identity(
 
 
 # ==================================================
-# 🆕 ADDITION 1: MangaDex fallback search helper
+# 🆕 MANGADEX-ONLY RESOLVER HELPERS
 # ==================================================
 
-async def _resolve_manga_from_mangadex_search(
-    query: str,
-    client: httpx.AsyncClient,
-    min_score: float = MANGADEX_FALLBACK_MIN_SCORE,
-) -> Optional[dict]:
+def _build_resolved_result(
+    manga: dict,
+    source: str,
+    match_score: Optional[float] = None,
+) -> dict:
     """
-    تبحث في MangaDex بالعنوان وتُعيد أفضل تطابق.
-
-    تُستخدم كخطة بديلة عندما يفشل AniList
-    (سواء كان المعرّف رقماً غير موجود أو نصاً/عنواناً).
+    بناء استجابة موحّدة من كائن MangaDex (بدون AniList).
     """
 
-    query = _clean_text(query)
+    result = {
+        "mangadex_id": manga.get("id"),
+        "anilist_id": None,
+        "title": _mangadex_title(manga),
+        "titles": extract_titles(manga),
+        "description": _mangadex_description(manga),
+        "cover": _mangadex_cover(manga),
+        "status": _mangadex_status(manga),
+        "year": _mangadex_year(manga),
+        "original_language": _mangadex_original_language(manga),
+        "source": source,
+        "mangadex": manga,
+        "anilist": None,
+    }
 
-    if not query:
-        return None
+    if match_score is not None:
+        result["match_score"] = round(float(match_score), 3)
 
-    try:
-        candidates = await search_mangadex(
-            query,
-            client=client,
-            limit=10,
-        )
-    except HttpFailure:
-        return None
+    return result
 
-    if not candidates:
-        return None
 
-    ranked = []
+async def search_mangadex(
+    title: str,
+    client: Optional[httpx.AsyncClient] = None,
+    limit: int = 20,
+) -> list[dict]:
+    """
+    البحث في MangaDex بالعنوان عبر GET /manga.
+    """
 
-    for manga in candidates:
+    title = _clean_text(title)
 
-        if not isinstance(manga, dict):
-            continue
+    if not title:
+        return []
 
-        manga_titles = extract_titles(manga)
+    limit = max(1, min(int(limit), 100))
 
-        if not manga_titles:
-            continue
-
-        score = _best_title_similarity(
-            [query],
-            manga_titles,
-        )
-
-        ranked.append((score, manga))
-
-    if not ranked:
-        return None
-
-    ranked.sort(
-        key=lambda item: item[0],
-        reverse=True,
+    cache_key = (
+        f"search:{_normalize_title(title)}:{limit}"
     )
 
-    best_score, best_manga = ranked[0]
+    cached = await _resolve_cache.get(cache_key)
 
-    if best_score < min_score:
-        return None
+    if cached is not None:
 
-    return best_manga
+        return [
+            dict(item)
+            for item in cached
+        ]
+
+    params = {
+        "title": title,
+        "limit": limit,
+        "includes[]": [
+            "cover_art",
+            "author",
+            "artist",
+        ],
+        "order[relevance]": "desc",
+    }
+
+    async def _fetch(active_client):
+
+        payload = await _mangadex_get(
+            active_client,
+            "/manga",
+            params,
+        )
+
+        return _extract_feed_data(payload)
+
+    if client is not None:
+
+        result = await _fetch(client)
+
+    else:
+
+        async with _client_context() as active_client:
+            result = await _fetch(active_client)
+
+    await _resolve_cache.set(
+        cache_key,
+        result,
+    )
+
+    return [
+        dict(item)
+        for item in result
+    ]
 
 
-# ==================================================
-# 🆕 ADDITION 2: resolve_manga مع الخطة البديلة
-# ==================================================
+UUID_PATTERN = (
+    r"[0-9a-fA-F]{8}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{12}"
+)
+
 
 async def resolve_manga(
     manga_id: str,
     client: Optional[httpx.AsyncClient] = None,
 ) -> dict:
+    """
+    تحديد هوية المانجا من MangaDex فقط (بدون AniList).
+
+    - UUID صالح → جلب مباشر من MangaDex.
+    - أي نص آخر (اسم، عنوان، رقم) → بحث بالعنوان في MangaDex
+      واختيار أفضل تطابق تلقائياً.
+    """
 
     manga_id = str(manga_id).strip()
 
@@ -1717,7 +1719,7 @@ async def resolve_manga(
 
         raise HTTPException(
             status_code=400,
-            detail="Missing manga ID",
+            detail="معرّف المانجا مطلوب.",
         )
 
     cache_key = f"resolve:{manga_id}"
@@ -1727,90 +1729,12 @@ async def resolve_manga(
     if cached is not None:
         return dict(cached)
 
-    # ----------------------------------------------
-    # باني استجابة MangaDex الموحَّد
-    # ----------------------------------------------
-
-    def _build_mangadex_result(
-        manga: dict,
-        source: str,
-        anilist: Optional[dict] = None,
-    ) -> dict:
-
-        anilist_title = ""
-        anilist_desc = ""
-        anilist_cover = ""
-        anilist_status = ""
-        anilist_year = None
-        anilist_id = None
-
-        if isinstance(anilist, dict):
-
-            anilist_id = anilist.get("id")
-
-            title_obj = anilist.get("title") or {}
-            if isinstance(title_obj, dict):
-                anilist_title = (
-                    title_obj.get("english")
-                    or title_obj.get("romaji")
-                    or title_obj.get("native")
-                    or ""
-                )
-
-            anilist_desc = anilist.get("description") or ""
-
-            cover_obj = anilist.get("coverImage") or {}
-            if isinstance(cover_obj, dict):
-                anilist_cover = cover_obj.get("large") or ""
-
-            anilist_status = anilist.get("status") or ""
-
-            start_obj = anilist.get("startDate") or {}
-            if isinstance(start_obj, dict):
-                anilist_year = start_obj.get("year")
-
-        return {
-            "mangadex_id": manga.get("id"),
-            "anilist_id": anilist_id,
-            "title": (
-                anilist_title
-                or _mangadex_title(manga)
-            ),
-            "titles": extract_titles(manga),
-            "description": (
-                anilist_desc
-                or _mangadex_description(manga)
-            ),
-            "cover": (
-                anilist_cover
-                or _mangadex_cover(manga)
-            ),
-            "status": (
-                anilist_status
-                or _mangadex_status(manga)
-            ),
-            "year": (
-                anilist_year
-                or _mangadex_year(manga)
-            ),
-            "source": source,
-            "mangadex": manga,
-            "anilist": anilist,
-        }
-
     async def _fetch(active_client):
 
         # ==========================================
-        # 1) UUID → MangaDex مباشرة
+        # 1) UUID → جلب مباشر من MangaDex
         # ==========================================
-        if re.fullmatch(
-            r"[0-9a-fA-F]{8}-"
-            r"[0-9a-fA-F]{4}-"
-            r"[0-9a-fA-F]{4}-"
-            r"[0-9a-fA-F]{4}-"
-            r"[0-9a-fA-F]{12}",
-            manga_id,
-        ):
+        if re.fullmatch(UUID_PATTERN, manga_id):
 
             payload = await _mangadex_get(
                 active_client,
@@ -1830,156 +1754,104 @@ async def resolve_manga(
 
                 raise HTTPException(
                     status_code=404,
-                    detail="MangaDex manga not found",
+                    detail=(
+                        f"لا توجد مانجا في MangaDex بالمعرّف {manga_id}."
+                    ),
                 )
 
-            return _build_mangadex_result(
+            return _build_resolved_result(
                 manga,
                 source="mangadex",
             )
 
         # ==========================================
-        # 2) رقم → AniList، وإن فشل → MangaDex
+        # 2) نص / عنوان → بحث في MangaDex
         # ==========================================
-        if manga_id.isdigit():
+        logger.info(
+            "Resolving manga by title via MangaDex: %s",
+            manga_id,
+        )
 
-            anilist_query = """
-            query ($id: Int) {
-                Media(id: $id, type: MANGA) {
-                    id
-                    idMal
-                    title {
-                        romaji
-                        english
-                        native
-                    }
-                    description
-                    coverImage {
-                        large
-                        medium
-                    }
-                    status
-                    startDate {
-                        year
-                    }
-                    chapters
-                    volumes
-                    countryOfOrigin
-                    format
-                    synonyms
-                }
-            }
-            """
-
-            anilist = None
-            anilist_failed = False
-
-            try:
-                data = await _anilist_post(
-                    active_client,
-                    anilist_query,
-                    {"id": int(manga_id)},
-                )
-
-                anilist = data.get("Media")
-
-                if not isinstance(anilist, dict):
-                    anilist_failed = True
-
-            except HttpFailure as exc:
-                # 404 من AniList يعني: غير موجود أو نوع آخر (ANIME)
-                if exc.status_code == 404:
-                    anilist_failed = True
-                else:
-                    # 5xx → خطأ خادم حقيقي
-                    raise
-
-            # محاولة المطابقة في MangaDex عبر AniList
-            if anilist and not anilist_failed:
-
-                title_data = anilist.get("title") or {}
-
-                title = (
-                    title_data.get("english")
-                    or title_data.get("romaji")
-                    or title_data.get("native")
-                )
-
-                if title:
-
-                    candidates = await search_mangadex(
-                        title,
-                        client=active_client,
-                        limit=30,
-                    )
-
-                    matched = match_mangadex(
-                        anilist,
-                        candidates,
-                    )
-
-                    if matched:
-
-                        return _build_mangadex_result(
-                            matched,
-                            source="anilist+mangadex",
-                            anilist=anilist,
-                        )
-
-            # --------------------------------------------------
-            # ✅ الخطة البديلة: البحث في MangaDex بالرقم كعنوان
-            # --------------------------------------------------
-            logger.warning(
-                "AniList failed for ID %s, falling back to MangaDex search",
+        try:
+            candidates = await search_mangadex(
                 manga_id,
+                client=active_client,
+                limit=20,
             )
 
-            fallback = await _resolve_manga_from_mangadex_search(
-                manga_id,
-                active_client,
-            )
+        except HttpFailure as exc:
 
-            if fallback:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "فشل الاتصال بـ MangaDex أثناء البحث. "
+                    f"تفاصيل: {exc}"
+                ),
+            ) from exc
 
-                return _build_mangadex_result(
-                    fallback,
-                    source="mangadex-fallback",
-                )
+        if not candidates:
 
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    f"لم يتم العثور على المانجا {manga_id} "
-                    "لا في AniList ولا في MangaDex. "
-                    "تأكد من المعرّف، أو استخدم UUID من MangaDex مباشرة."
+                    f"لم يتم العثور على مانجا بعنوان «{manga_id}» "
+                    "في MangaDex. تحقق من الاسم أو استخدم UUID."
                 ),
             )
 
-        # ==========================================
-        # 3) نص حر → بحث في MangaDex بالعنوان
-        # ==========================================
-        fallback = await _resolve_manga_from_mangadex_search(
-            manga_id,
-            active_client,
-        )
+        # ترتيب أفضل التطابقات
+        ranked = []
 
-        if fallback:
+        for manga in candidates:
 
-            return _build_mangadex_result(
-                fallback,
-                source="mangadex-search",
+            if not isinstance(manga, dict):
+                continue
+
+            titles = extract_titles(manga)
+
+            if not titles:
+                continue
+
+            score = _best_title_similarity(
+                [manga_id],
+                titles,
             )
 
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"لم يتم العثور على مانجا بعنوان «{manga_id}» في MangaDex."
-            ),
+            ranked.append((score, manga))
+
+        if not ranked:
+
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"تم العثور على نتائج لـ «{manga_id}» "
+                    "لكن بدون عناوين قابلة للمطابقة."
+                ),
+            )
+
+        ranked.sort(
+            key=lambda item: item[0],
+            reverse=True,
         )
 
-    # ----------------------------------------------
-    # تنفيذ الطلب
-    # ----------------------------------------------
+        best_score, best_manga = ranked[0]
+
+        if best_score < MANGADEX_TITLE_MIN_SCORE:
+
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"تم العثور على نتائج لـ «{manga_id}» "
+                    "لكن بدون تطابق موثوق. "
+                    "جرّب اسماً أدق أو استخدم UUID مباشرة."
+                ),
+            )
+
+        return _build_resolved_result(
+            best_manga,
+            source="mangadex-search",
+            match_score=best_score,
+        )
 
     try:
 
@@ -2018,6 +1890,10 @@ async def fetch_available_languages(
     manga_id: str,
     client: Optional[httpx.AsyncClient] = None,
 ) -> list[str]:
+    """
+    اكتشاف اللغات المتاحة لمانجا عبر /manga/{id}/feed
+    (بدون فلتر لغة، ثم جمع translatedLanguage).
+    """
 
     manga_id = str(manga_id).strip()
 
@@ -2037,6 +1913,8 @@ async def fetch_available_languages(
         total = None
         completed = False
 
+        endpoint = f"/manga/{manga_id}/feed"
+
         for _page_index in range(MAX_FEED_PAGES):
 
             if offset in visited_offsets:
@@ -2049,7 +1927,6 @@ async def fetch_available_languages(
             visited_offsets.add(offset)
 
             params = {
-                "manga": [manga_id],
                 "limit": FEED_PAGE_SIZE,
                 "offset": offset,
                 "order[chapter]": "asc",
@@ -2057,7 +1934,7 @@ async def fetch_available_languages(
 
             payload = await _mangadex_get(
                 active_client,
-                "/chapter",
+                endpoint,
                 params,
             )
 
@@ -2283,7 +2160,7 @@ def _deduplicate_chapters(
 
 
 # ==================================================
-# FETCH ALL CHAPTERS
+# FETCH ALL CHAPTERS  (يستعمل /manga/{id}/feed الرسمي)
 # ==================================================
 
 async def fetch_all_chapters(
@@ -2292,6 +2169,13 @@ async def fetch_all_chapters(
     client: Optional[httpx.AsyncClient] = None,
     progress_key: Optional[str] = None,
 ) -> list[dict]:
+    """
+    جلب فصول مانجا من MangaDex عبر المسار الرسمي
+    GET /manga/{id}/feed.
+
+    - يدعم فلترة اللغة عبر translatedLanguage[].
+    - يكشف الدوران والنتائج الناقصة.
+    """
 
     manga_id = str(manga_id).strip()
 
@@ -2345,6 +2229,8 @@ async def fetch_all_chapters(
         completed = False
         page_index = 0
 
+        endpoint = f"/manga/{manga_id}/feed"
+
         for page_index in range(MAX_FEED_PAGES):
 
             if offset in visited_offsets:
@@ -2357,7 +2243,6 @@ async def fetch_all_chapters(
             visited_offsets.add(offset)
 
             params = {
-                "manga": [manga_id],
                 "limit": FEED_PAGE_SIZE,
                 "offset": offset,
                 "order[chapter]": "asc",
@@ -2382,7 +2267,7 @@ async def fetch_all_chapters(
 
             payload = await _mangadex_get(
                 active_client,
-                "/chapter",
+                endpoint,
                 params,
             )
 
@@ -2721,336 +2606,6 @@ def _build_chapter_response(
 
 
 # ==================================================
-# ANILIST
-# ==================================================
-
-ANILIST_SEARCH_QUERY = """
-query ($search: String) {
-    Media(search: $search, type: MANGA) {
-        id
-        idMal
-        title {
-            romaji
-            english
-            native
-        }
-        description
-        coverImage {
-            large
-            medium
-        }
-        status
-        startDate {
-            year
-        }
-        chapters
-        volumes
-        countryOfOrigin
-        format
-        synonyms
-    }
-}
-"""
-
-
-async def fetch_anilist(
-    title: str,
-    client: Optional[httpx.AsyncClient] = None,
-) -> Optional[dict]:
-
-    title = _clean_text(title)
-
-    if not title:
-        return None
-
-    cache_key = (
-        f"anilist:{_normalize_title(title)}"
-    )
-
-    cached = await _resolve_cache.get(cache_key)
-
-    if cached is not None:
-
-        return (
-            dict(cached)
-            if cached
-            else None
-        )
-
-    async def _fetch(active_client):
-
-        data = await _anilist_post(
-            active_client,
-            ANILIST_SEARCH_QUERY,
-            {"search": title},
-        )
-
-        media = data.get("Media")
-
-        if not isinstance(media, dict):
-            return None
-
-        titles = media.get("title") or {}
-
-        all_titles = []
-
-        if isinstance(titles, dict):
-
-            all_titles.extend([
-                titles.get("romaji"),
-                titles.get("english"),
-                titles.get("native"),
-            ])
-
-        synonyms = media.get("synonyms") or []
-
-        if isinstance(synonyms, list):
-            all_titles.extend(synonyms)
-
-        score = _best_title_similarity(
-            [title],
-            [
-                item
-                for item in all_titles
-                if item
-            ],
-        )
-
-        if score < TITLE_MATCH_THRESHOLD:
-            return None
-
-        return media
-
-    if client is not None:
-
-        result = await _fetch(client)
-
-    else:
-
-        async with _client_context() as active_client:
-            result = await _fetch(active_client)
-
-    await _resolve_cache.set(
-        cache_key,
-        result,
-    )
-
-    return result
-
-
-# ==================================================
-# MANGADEX SEARCH
-# ==================================================
-
-async def search_mangadex(
-    title: str,
-    client: Optional[httpx.AsyncClient] = None,
-    limit: int = 20,
-) -> list[dict]:
-
-    title = _clean_text(title)
-
-    if not title:
-        return []
-
-    limit = max(
-        1,
-        min(int(limit), 100),
-    )
-
-    cache_key = (
-        f"search:{_normalize_title(title)}:{limit}"
-    )
-
-    cached = await _resolve_cache.get(cache_key)
-
-    if cached is not None:
-
-        return [
-            dict(item)
-            for item in cached
-        ]
-
-    params = {
-        "title": title,
-        "limit": limit,
-        "includes[]": [
-            "cover_art",
-            "author",
-            "artist",
-        ],
-        "order[relevance]": "desc",
-    }
-
-    async def _fetch(active_client):
-
-        payload = await _mangadex_get(
-            active_client,
-            "/manga",
-            params,
-        )
-
-        return _extract_feed_data(payload)
-
-    if client is not None:
-
-        result = await _fetch(client)
-
-    else:
-
-        async with _client_context() as active_client:
-            result = await _fetch(active_client)
-
-    await _resolve_cache.set(
-        cache_key,
-        result,
-    )
-
-    return [
-        dict(item)
-        for item in result
-    ]
-
-
-# ==================================================
-# MANGADEX MATCHING
-# ==================================================
-
-def match_mangadex(
-    anilist: dict,
-    candidates: list[dict],
-) -> Optional[dict]:
-
-    if not isinstance(anilist, dict):
-        return None
-
-    anilist_title_data = anilist.get(
-        "title",
-        {},
-    )
-
-    anilist_titles = []
-
-    if isinstance(anilist_title_data, dict):
-
-        anilist_titles.extend([
-            anilist_title_data.get("romaji"),
-            anilist_title_data.get("english"),
-            anilist_title_data.get("native"),
-        ])
-
-    synonyms = anilist.get("synonyms") or []
-
-    if isinstance(synonyms, list):
-        anilist_titles.extend(synonyms)
-
-    anilist_titles = [
-        _clean_text(item)
-        for item in anilist_titles
-        if _clean_text(item)
-    ]
-
-    if not anilist_titles:
-        return None
-
-    ranked = []
-
-    for manga in candidates:
-
-        if not isinstance(manga, dict):
-            continue
-
-        manga_titles = extract_titles(manga)
-
-        if not manga_titles:
-            continue
-
-        score = _best_title_similarity(
-            anilist_titles,
-            manga_titles,
-        )
-
-        attributes = manga.get(
-            "attributes",
-            {},
-        )
-
-        if not isinstance(attributes, dict):
-            attributes = {}
-
-        original_language = attributes.get(
-            "originalLanguage"
-        )
-
-        country = anilist.get(
-            "countryOfOrigin"
-        )
-
-        language_bonus = 0.0
-
-        if (
-            country == "JP"
-            and original_language == "ja"
-        ):
-            language_bonus = 0.01
-
-        elif (
-            country == "KR"
-            and original_language == "ko"
-        ):
-            language_bonus = 0.01
-
-        elif (
-            country == "CN"
-            and original_language == "zh"
-        ):
-            language_bonus = 0.01
-
-        final_score = min(
-            1.0,
-            score + language_bonus,
-        )
-
-        ranked.append((
-            final_score,
-            manga,
-        ))
-
-    if not ranked:
-        return None
-
-    ranked.sort(
-        key=lambda item: item[0],
-        reverse=True,
-    )
-
-    best_score, best_manga = ranked[0]
-
-    if best_score < TITLE_MATCH_THRESHOLD:
-        return None
-
-    if len(ranked) > 1:
-
-        second_score = ranked[1][0]
-
-        if (
-            best_score - second_score
-            < TITLE_MATCH_MIN_MARGIN
-        ):
-            return None
-
-    return best_manga
-
-
-# ==================================================
-# ⚠️ resolve_manga — تم نقلها إلى Part 1
-# ==================================================
-# لا تضفها هنا مرة أخرى.
-# النسخة الجديدة (مع MangaDex fallback) موجودة في
-# نهاية الجزء الأول، ويجب ألا توجد نسختان.
-
-
-# ==================================================
 # FETCH LANGUAGE CHAPTERS
 # ==================================================
 
@@ -3083,7 +2638,7 @@ async def fetch_language(
 
 
 # ==================================================
-# MAIN CHAPTER ROUTE
+# MAIN CHAPTER ROUTE  (اللغة الافتراضية: ar)
 # ==================================================
 
 @router.get("/manga/{manga_id}/chapters")
@@ -3091,26 +2646,26 @@ async def get_chapters(
     manga_id: str,
     language: Optional[str] = Query(
         default=None,
-        description="Optional translated language code",
+        description="رمز اللغة (افتراضي: ar للعربية)",
     ),
 ):
 
-    normalized_language = (
-        _valid_language_code(language)
-        if language
-        else None
+    effective_language = language or DEFAULT_LANGUAGE
+
+    normalized_language = _valid_language_code(
+        effective_language
     )
 
-    if language and not normalized_language:
+    if not normalized_language:
 
         raise HTTPException(
             status_code=400,
-            detail="Invalid language code",
+            detail=(
+                "رمز لغة غير صالح. استخدم رمزاً مثل ar أو en."
+            ),
         )
 
-    progress_key = (
-        f"{manga_id}:{normalized_language or 'all'}"
-    )
+    progress_key = f"{manga_id}:{normalized_language}"
 
     try:
 
@@ -3122,7 +2677,9 @@ async def get_chapters(
 
             raise HTTPException(
                 status_code=404,
-                detail="MangaDex ID not found",
+                detail=(
+                    "لم يتم العثور على معرّف MangaDex لهذه المانجا."
+                ),
             )
 
         chapters = await fetch_all_chapters(
@@ -3130,6 +2687,19 @@ async def get_chapters(
             language=normalized_language,
             progress_key=progress_key,
         )
+
+        if not chapters:
+
+            lang_name = _language_name(normalized_language)
+
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"لا توجد فصول متاحة باللغة {lang_name} "
+                    f"({normalized_language}) لهذه المانجا في MangaDex. "
+                    "جرّب لغة أخرى أو تحقق لاحقاً."
+                ),
+            )
 
         response = _build_chapter_response(
             actual_id,
@@ -3156,7 +2726,7 @@ async def get_chapters(
 
 
 # ==================================================
-# LEGACY CHAPTER-LIST ROUTE
+# LEGACY CHAPTER-LIST ROUTE  (اللغة الافتراضية: ar)
 # ==================================================
 
 @router.get("/manga/{manga_id}/chapter-list")
@@ -3165,22 +2735,20 @@ async def get_chapter_list(
     language: Optional[str] = None,
 ):
 
-    normalized_language = (
-        _valid_language_code(language)
-        if language
-        else None
+    effective_language = language or DEFAULT_LANGUAGE
+
+    normalized_language = _valid_language_code(
+        effective_language
     )
 
-    if language and not normalized_language:
+    if not normalized_language:
 
         raise HTTPException(
             status_code=400,
-            detail="Invalid language code",
+            detail="رمز لغة غير صالح.",
         )
 
-    progress_key = (
-        f"{manga_id}:{normalized_language or 'all'}"
-    )
+    progress_key = f"{manga_id}:{normalized_language}"
 
     try:
 
@@ -3192,7 +2760,7 @@ async def get_chapter_list(
 
             raise HTTPException(
                 status_code=404,
-                detail="MangaDex ID not found",
+                detail="لم يتم العثور على معرّف MangaDex.",
             )
 
         chapters = await fetch_all_chapters(
@@ -3200,6 +2768,18 @@ async def get_chapter_list(
             language=normalized_language,
             progress_key=progress_key,
         )
+
+        if not chapters:
+
+            lang_name = _language_name(normalized_language)
+
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"لا توجد فصول باللغة {lang_name} "
+                    f"({normalized_language}) لهذه المانجا."
+                ),
+            )
 
         serialized = [
             _serialize_chapter(chapter)
@@ -3231,14 +2811,14 @@ async def get_chapter_list_progress(
     language: Optional[str] = None,
 ):
 
-    language = (
-        _valid_language_code(language)
-        if language
-        else None
+    effective_language = language or DEFAULT_LANGUAGE
+
+    normalized_language = _valid_language_code(
+        effective_language
     )
 
     progress_key = (
-        f"{manga_id}:{language or 'all'}"
+        f"{manga_id}:{normalized_language or DEFAULT_LANGUAGE}"
     )
 
     progress = await _progress_store.snapshot(
@@ -3249,7 +2829,7 @@ async def get_chapter_list_progress(
 
         return {
             "manga_id": manga_id,
-            "language": language,
+            "language": normalized_language,
             "status": "not_started",
             "chapters_fetched": 0,
             "page": 0,

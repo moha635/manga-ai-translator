@@ -5,6 +5,7 @@ Corrected version 5.1
 - يحافظ على router والمسارات القديمة.
 - MangaDex هو مصدر الفصول.
 - AniList للمعلومات ومطابقة هوية العمل.
+- خطة بديلة تلقائية: إذا فشل AniList → البحث في MangaDex.
 - Pagination مع كشف الدوران والنتائج الناقصة.
 - Cache وProgress في الذاكرة فقط.
 - لا يحتاج مكتبات إضافية أو قاعدة بيانات.
@@ -101,6 +102,9 @@ PROGRESS_MAX_SIZE = 200
 
 TITLE_MATCH_THRESHOLD = 0.90
 TITLE_MATCH_MIN_MARGIN = 0.06
+
+# حد أدنى أخف للخطة البديلة عبر MangaDex
+MANGADEX_FALLBACK_MIN_SCORE = 0.50
 
 logger = logging.getLogger(__name__)
 
@@ -867,9 +871,6 @@ def _normalize_title(
     """
     تطبيع العناوين مع الحفاظ على الحروف
     العربية واليابانية والكورية والصينية وغيرها.
-
-    لا نحصر النص في a-z لأن ذلك كان يؤدي
-    إلى حذف كثير من عناوين المانهو والمانغا.
     """
 
     text = _clean_text(value).casefold()
@@ -1431,7 +1432,7 @@ def _extract_feed_total(
 
 
 # ==================================================
-# CHAPTER ATTRIBUTE HELPERS  (FIXED — كانت مفقودة)
+# CHAPTER ATTRIBUTE HELPERS (المصحَّحة)
 # ==================================================
 
 def _chapter_attributes(
@@ -1558,7 +1559,7 @@ def _chapter_scanlation_group_ids(
 ) -> tuple[str, ...]:
     """
     استخراج معرّفات مجموعات الترجمة المرتبطة بالفصل.
-    تُستخدم للتمييز بين نسخ متعددة من نفس الفصل.
+    تُستخدم للتمييز بين نُسخ متعددة من نفس الفصل.
     """
 
     relationships = chapter.get("relationships", [])
@@ -1631,7 +1632,385 @@ def _chapter_identity(
         "unique",
         str(chapter.get("id", "")),
     )
-    # ==================================================
+
+
+# ==================================================
+# 🆕 ADDITION 1: MangaDex fallback search helper
+# ==================================================
+
+async def _resolve_manga_from_mangadex_search(
+    query: str,
+    client: httpx.AsyncClient,
+    min_score: float = MANGADEX_FALLBACK_MIN_SCORE,
+) -> Optional[dict]:
+    """
+    تبحث في MangaDex بالعنوان وتُعيد أفضل تطابق.
+
+    تُستخدم كخطة بديلة عندما يفشل AniList
+    (سواء كان المعرّف رقماً غير موجود أو نصاً/عنواناً).
+    """
+
+    query = _clean_text(query)
+
+    if not query:
+        return None
+
+    try:
+        candidates = await search_mangadex(
+            query,
+            client=client,
+            limit=10,
+        )
+    except HttpFailure:
+        return None
+
+    if not candidates:
+        return None
+
+    ranked = []
+
+    for manga in candidates:
+
+        if not isinstance(manga, dict):
+            continue
+
+        manga_titles = extract_titles(manga)
+
+        if not manga_titles:
+            continue
+
+        score = _best_title_similarity(
+            [query],
+            manga_titles,
+        )
+
+        ranked.append((score, manga))
+
+    if not ranked:
+        return None
+
+    ranked.sort(
+        key=lambda item: item[0],
+        reverse=True,
+    )
+
+    best_score, best_manga = ranked[0]
+
+    if best_score < min_score:
+        return None
+
+    return best_manga
+
+
+# ==================================================
+# 🆕 ADDITION 2: resolve_manga مع الخطة البديلة
+# ==================================================
+
+async def resolve_manga(
+    manga_id: str,
+    client: Optional[httpx.AsyncClient] = None,
+) -> dict:
+
+    manga_id = str(manga_id).strip()
+
+    if not manga_id:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Missing manga ID",
+        )
+
+    cache_key = f"resolve:{manga_id}"
+
+    cached = await _resolve_cache.get(cache_key)
+
+    if cached is not None:
+        return dict(cached)
+
+    # ----------------------------------------------
+    # باني استجابة MangaDex الموحَّد
+    # ----------------------------------------------
+
+    def _build_mangadex_result(
+        manga: dict,
+        source: str,
+        anilist: Optional[dict] = None,
+    ) -> dict:
+
+        anilist_title = ""
+        anilist_desc = ""
+        anilist_cover = ""
+        anilist_status = ""
+        anilist_year = None
+        anilist_id = None
+
+        if isinstance(anilist, dict):
+
+            anilist_id = anilist.get("id")
+
+            title_obj = anilist.get("title") or {}
+            if isinstance(title_obj, dict):
+                anilist_title = (
+                    title_obj.get("english")
+                    or title_obj.get("romaji")
+                    or title_obj.get("native")
+                    or ""
+                )
+
+            anilist_desc = anilist.get("description") or ""
+
+            cover_obj = anilist.get("coverImage") or {}
+            if isinstance(cover_obj, dict):
+                anilist_cover = cover_obj.get("large") or ""
+
+            anilist_status = anilist.get("status") or ""
+
+            start_obj = anilist.get("startDate") or {}
+            if isinstance(start_obj, dict):
+                anilist_year = start_obj.get("year")
+
+        return {
+            "mangadex_id": manga.get("id"),
+            "anilist_id": anilist_id,
+            "title": (
+                anilist_title
+                or _mangadex_title(manga)
+            ),
+            "titles": extract_titles(manga),
+            "description": (
+                anilist_desc
+                or _mangadex_description(manga)
+            ),
+            "cover": (
+                anilist_cover
+                or _mangadex_cover(manga)
+            ),
+            "status": (
+                anilist_status
+                or _mangadex_status(manga)
+            ),
+            "year": (
+                anilist_year
+                or _mangadex_year(manga)
+            ),
+            "source": source,
+            "mangadex": manga,
+            "anilist": anilist,
+        }
+
+    async def _fetch(active_client):
+
+        # ==========================================
+        # 1) UUID → MangaDex مباشرة
+        # ==========================================
+        if re.fullmatch(
+            r"[0-9a-fA-F]{8}-"
+            r"[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{12}",
+            manga_id,
+        ):
+
+            payload = await _mangadex_get(
+                active_client,
+                f"/manga/{manga_id}",
+                {
+                    "includes[]": [
+                        "cover_art",
+                        "author",
+                        "artist",
+                    ]
+                },
+            )
+
+            manga = payload.get("data")
+
+            if not isinstance(manga, dict):
+
+                raise HTTPException(
+                    status_code=404,
+                    detail="MangaDex manga not found",
+                )
+
+            return _build_mangadex_result(
+                manga,
+                source="mangadex",
+            )
+
+        # ==========================================
+        # 2) رقم → AniList، وإن فشل → MangaDex
+        # ==========================================
+        if manga_id.isdigit():
+
+            anilist_query = """
+            query ($id: Int) {
+                Media(id: $id, type: MANGA) {
+                    id
+                    idMal
+                    title {
+                        romaji
+                        english
+                        native
+                    }
+                    description
+                    coverImage {
+                        large
+                        medium
+                    }
+                    status
+                    startDate {
+                        year
+                    }
+                    chapters
+                    volumes
+                    countryOfOrigin
+                    format
+                    synonyms
+                }
+            }
+            """
+
+            anilist = None
+            anilist_failed = False
+
+            try:
+                data = await _anilist_post(
+                    active_client,
+                    anilist_query,
+                    {"id": int(manga_id)},
+                )
+
+                anilist = data.get("Media")
+
+                if not isinstance(anilist, dict):
+                    anilist_failed = True
+
+            except HttpFailure as exc:
+                # 404 من AniList يعني: غير موجود أو نوع آخر (ANIME)
+                if exc.status_code == 404:
+                    anilist_failed = True
+                else:
+                    # 5xx → خطأ خادم حقيقي
+                    raise
+
+            # محاولة المطابقة في MangaDex عبر AniList
+            if anilist and not anilist_failed:
+
+                title_data = anilist.get("title") or {}
+
+                title = (
+                    title_data.get("english")
+                    or title_data.get("romaji")
+                    or title_data.get("native")
+                )
+
+                if title:
+
+                    candidates = await search_mangadex(
+                        title,
+                        client=active_client,
+                        limit=30,
+                    )
+
+                    matched = match_mangadex(
+                        anilist,
+                        candidates,
+                    )
+
+                    if matched:
+
+                        return _build_mangadex_result(
+                            matched,
+                            source="anilist+mangadex",
+                            anilist=anilist,
+                        )
+
+            # --------------------------------------------------
+            # ✅ الخطة البديلة: البحث في MangaDex بالرقم كعنوان
+            # --------------------------------------------------
+            logger.warning(
+                "AniList failed for ID %s, falling back to MangaDex search",
+                manga_id,
+            )
+
+            fallback = await _resolve_manga_from_mangadex_search(
+                manga_id,
+                active_client,
+            )
+
+            if fallback:
+
+                return _build_mangadex_result(
+                    fallback,
+                    source="mangadex-fallback",
+                )
+
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"لم يتم العثور على المانجا {manga_id} "
+                    "لا في AniList ولا في MangaDex. "
+                    "تأكد من المعرّف، أو استخدم UUID من MangaDex مباشرة."
+                ),
+            )
+
+        # ==========================================
+        # 3) نص حر → بحث في MangaDex بالعنوان
+        # ==========================================
+        fallback = await _resolve_manga_from_mangadex_search(
+            manga_id,
+            active_client,
+        )
+
+        if fallback:
+
+            return _build_mangadex_result(
+                fallback,
+                source="mangadex-search",
+            )
+
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"لم يتم العثور على مانجا بعنوان «{manga_id}» في MangaDex."
+            ),
+        )
+
+    # ----------------------------------------------
+    # تنفيذ الطلب
+    # ----------------------------------------------
+
+    try:
+
+        if client is not None:
+
+            result = await _fetch(client)
+
+        else:
+
+            async with _client_context() as active_client:
+                result = await _fetch(active_client)
+
+    except HTTPException:
+        raise
+
+    except HttpFailure as exc:
+
+        raise _http_exception(exc) from exc
+
+    await _resolve_cache.set(
+        cache_key,
+        result,
+    )
+
+    return result
+
+
+# ==================================================
+# END OF PART 1
+# ==================================================
+# ==================================================
 # FETCH AVAILABLE LANGUAGES
 # ==================================================
 
@@ -2428,8 +2807,6 @@ async def fetch_anilist(
         if isinstance(synonyms, list):
             all_titles.extend(synonyms)
 
-        # title_similarity تستقبل عنوانين مفردين،
-        # والمقارنة بين القوائم تتم عبر _best_title_similarity.
         score = _best_title_similarity(
             [title],
             [
@@ -2666,206 +3043,11 @@ def match_mangadex(
 
 
 # ==================================================
-# RESOLVE MANGA
+# ⚠️ resolve_manga — تم نقلها إلى Part 1
 # ==================================================
-
-async def resolve_manga(
-    manga_id: str,
-    client: Optional[httpx.AsyncClient] = None,
-) -> dict:
-
-    manga_id = str(manga_id).strip()
-
-    if not manga_id:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Missing manga ID",
-        )
-
-    cache_key = f"resolve:{manga_id}"
-
-    cached = await _resolve_cache.get(cache_key)
-
-    if cached is not None:
-        return dict(cached)
-
-    async def _fetch(active_client):
-
-        if re.fullmatch(
-            r"[0-9a-fA-F]{8}-"
-            r"[0-9a-fA-F]{4}-"
-            r"[0-9a-fA-F]{4}-"
-            r"[0-9a-fA-F]{4}-"
-            r"[0-9a-fA-F]{12}",
-            manga_id,
-        ):
-
-            payload = await _mangadex_get(
-                active_client,
-                f"/manga/{manga_id}",
-                {
-                    "includes[]": [
-                        "cover_art",
-                        "author",
-                        "artist",
-                    ]
-                },
-            )
-
-            manga = payload.get("data")
-
-            if not isinstance(manga, dict):
-
-                raise HTTPException(
-                    status_code=404,
-                    detail="MangaDex manga not found",
-                )
-
-            return {
-                "mangadex_id": manga.get("id"),
-                "anilist_id": None,
-                "title": _mangadex_title(manga),
-                "titles": extract_titles(manga),
-                "description": _mangadex_description(manga),
-                "cover": _mangadex_cover(manga),
-                "status": _mangadex_status(manga),
-                "year": _mangadex_year(manga),
-                "source": "mangadex",
-                "mangadex": manga,
-                "anilist": None,
-            }
-
-        if not manga_id.isdigit():
-
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid manga ID",
-            )
-
-        query = """
-        query ($id: Int) {
-            Media(id: $id, type: MANGA) {
-                id
-                idMal
-                title {
-                    romaji
-                    english
-                    native
-                }
-                description
-                coverImage {
-                    large
-                    medium
-                }
-                status
-                startDate {
-                    year
-                }
-                chapters
-                volumes
-                countryOfOrigin
-                format
-                synonyms
-            }
-        }
-        """
-
-        data = await _anilist_post(
-            active_client,
-            query,
-            {"id": int(manga_id)},
-        )
-
-        anilist = data.get("Media")
-
-        if not isinstance(anilist, dict):
-
-            raise HTTPException(
-                status_code=404,
-                detail="AniList manga not found",
-            )
-
-        title_data = anilist.get("title") or {}
-
-        title = (
-            title_data.get("english")
-            or title_data.get("romaji")
-            or title_data.get("native")
-        )
-
-        if not title:
-
-            raise HTTPException(
-                status_code=404,
-                detail="Manga title not found",
-            )
-
-        candidates = await search_mangadex(
-            title,
-            client=active_client,
-            limit=30,
-        )
-
-        matched = match_mangadex(
-            anilist,
-            candidates,
-        )
-
-        if not matched:
-
-            raise HTTPException(
-                status_code=404,
-                detail="No reliable MangaDex match found",
-            )
-
-        return {
-            "mangadex_id": matched.get("id"),
-            "anilist_id": anilist.get("id"),
-            "title": title,
-            "titles": extract_titles(matched),
-            "description": (
-                anilist.get("description")
-                or _mangadex_description(matched)
-            ),
-            "cover": (
-                (anilist.get("coverImage") or {}).get("large")
-                or _mangadex_cover(matched)
-            ),
-            "status": (
-                anilist.get("status")
-                or _mangadex_status(matched)
-            ),
-            "year": (
-                (anilist.get("startDate") or {}).get("year")
-                or _mangadex_year(matched)
-            ),
-            "source": "anilist+mangadex",
-            "mangadex": matched,
-            "anilist": anilist,
-        }
-
-    try:
-
-        if client is not None:
-
-            result = await _fetch(client)
-
-        else:
-
-            async with _client_context() as active_client:
-                result = await _fetch(active_client)
-
-    except HttpFailure as exc:
-
-        raise _http_exception(exc) from exc
-
-    await _resolve_cache.set(
-        cache_key,
-        result,
-    )
-
-    return result
+# لا تضفها هنا مرة أخرى.
+# النسخة الجديدة (مع MangaDex fallback) موجودة في
+# نهاية الجزء الأول، ويجب ألا توجد نسختان.
 
 
 # ==================================================
@@ -3164,5 +3346,5 @@ def get_semaphore(
 
 
 # ==================================================
-# END OF CHAPTERS MODULE
+# END OF PART 2
 # ==================================================

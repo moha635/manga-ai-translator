@@ -496,36 +496,107 @@ async def get_chapter_list(
             response.raise_for_status()
             data = response.json()
 
-        chapters = []
+        chapters_by_number = {}
 
         for item in data.get("data", []):
             attr = item.get("attributes", {})
             chapter_id = item.get("id")
 
+            chapter_number = attr.get("chapter")
+            volume = attr.get("volume")
+
+            # استخراج مجموعة الترجمة
             group = None
 
             for relation in item.get("relationships", []):
                 if relation.get("type") == "scanlation_group":
-                    group = relation.get("attributes", {}).get("name")
+                    group = (
+                        relation.get("attributes", {}).get("name")
+                    )
                     break
 
-            chapters.append({
+            chapter = {
                 "id": chapter_id,
-                "chapter": attr.get("chapter"),
+                "chapter": chapter_number,
                 "title": attr.get("title"),
-                "volume": attr.get("volume"),
+                "volume": volume,
                 "language": attr.get("translatedLanguage"),
                 "pages": attr.get("pages"),
                 "published_at": attr.get("readableAt"),
                 "group": group,
-                "url": f"https://mangadex.org/chapter/{chapter_id}",
-            })
+                "url": (
+                    f"https://mangadex.org/chapter/{chapter_id}"
+                ),
+                "alternative_sources": [],
+            }
+
+            # مفتاح التكرار: رقم الفصل + المجلد
+            duplicate_key = (
+                str(chapter_number).strip()
+                if chapter_number is not None
+                else f"special:{chapter_id}",
+                str(volume).strip()
+                if volume is not None
+                else "",
+            )
+
+            if duplicate_key not in chapters_by_number:
+                chapters_by_number[duplicate_key] = chapter
+                continue
+
+            existing = chapters_by_number[duplicate_key]
+
+            # الاحتفاظ بمعلومات النسخة البديلة
+            alternative = {
+                "id": chapter["id"],
+                "group": chapter["group"],
+                "pages": chapter["pages"],
+                "url": chapter["url"],
+            }
+
+            existing["alternative_sources"].append(
+                alternative
+            )
+
+            # اختيار النسخة الأفضل:
+            # 1- التي تحتوي على صفحات
+            # 2- الأحدث عند تساوي عدد الصفحات
+
+            existing_pages = existing.get("pages") or 0
+            new_pages = chapter.get("pages") or 0
+
+            existing_date = existing.get("published_at") or ""
+            new_date = chapter.get("published_at") or ""
+
+            if (
+                new_pages > existing_pages
+                or (
+                    new_pages == existing_pages
+                    and new_date > existing_date
+                )
+            ):
+                chapter["alternative_sources"] = (
+                    existing["alternative_sources"]
+                    + [
+                        {
+                            "id": existing["id"],
+                            "group": existing["group"],
+                            "pages": existing["pages"],
+                            "url": existing["url"],
+                        }
+                    ]
+                )
+
+                chapters_by_number[duplicate_key] = chapter
+
+        chapters = list(chapters_by_number.values())
 
         return {
             "manga_id": manga_id,
             "mangadex_id": mangadex_id,
             "language": language,
             "total": data.get("total", 0),
+            "unique_in_batch": len(chapters),
             "limit": limit,
             "offset": offset,
             "chapters": chapters,
